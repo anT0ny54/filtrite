@@ -3,11 +3,9 @@ name: Build filterlists
 on:
   push:
     branches: [ main ]
-
+  
   schedule:
-  - cron: "0 15 * * *"
-
-  workflow_dispatch:
+  - cron: "0 0 * * *"
 
 jobs:
   build:
@@ -17,34 +15,42 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: ^1.15
+        go-version: ^1.17
 
     - name: Download repo
       uses: actions/checkout@v4
 
+    - name: Download dependencies
+      run: |
+        go get -v -t -d ./...
+        if [ -f Gopkg.toml ]; then
+            curl https://raw.githubusercontent.com/golang/dep/master/install.sh | sh
+            dep ensure
+        fi
+      
     - name: Runnning build/generation script
       shell: bash
       run: |
-        bash ./generate.sh 2>&1
+        bash ./generate.sh
 
     - name: Generate tag name
-      run: echo "TAG_NAME=$(date +%F-%H-%M)" >> $GITHUB_ENV
+      run: echo "TAG_NAME=$(date +%F-%H-%M)" >> $GITHUB_ENV  
 
     - name: Release filter lists
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v1
       with:
-        files: dist/*.dat
+        files: dist/*
         name: Automatic list generation
         tag_name: ${{ env.TAG_NAME }}
         body_path: release.md
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
+    
     - name: Delete older releases
-      uses: dev-drprasad/delete-older-releases@v0.3.3
+      uses: dev-drprasad/delete-older-releases@v0.1.0
       with:
         keep_latest: 2
-        delete_tags: true
+        delete_tags: true 
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -52,5 +58,6 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: Logs
-        path: logs/*.log
+        path: logs/*
       if: ${{ always() }}
+      
