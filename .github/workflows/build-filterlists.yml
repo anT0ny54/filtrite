@@ -18,8 +18,6 @@ jobs:
       uses: actions/setup-go@v5
       with:
         go-version: ^1.15
-    - name: Set up Node
-      using: 'node20'
 
     - name: Download repo
       uses: actions/checkout@v4
