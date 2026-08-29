@@ -8,6 +8,17 @@ You can choose any list from the table, then hold the name to copy its link. Add
 | ------ | ------|
 | [Adblock Default](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) | Combined Adguard & EasyList filter list (Ads+Privacy+Annoyance) |
 
+
+#### :department_store: **MyKoyebDNSServer, free** <a name="dns server"></a>
+
+On [KoyebDNS](https://koyeb.com) you can use HaGeZi Blocklists MultiPro+TIF.
+
+| HaGeZi Blocklists | DNS-over-HTTPS |
+| --- | --- |
+| MultiPro + TIF | `https://flaky-liza-ant0ny54-00dc5eb8.koyeb.app/dns-query`
+|
+
+
 Alternatively, you can [go here to search forks of this project](https://filterlists.010.one/) for more lists, e.g. for other countries.
 
 
