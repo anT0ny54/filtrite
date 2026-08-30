@@ -62,4 +62,4 @@ This is free as in freedom software. Do whatever you like with it.
 ## Supporting My Project
 
 If you are interested in supporting the project you can donate :
- - Bitcoin: 
+ - Bitcoin: 1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP
