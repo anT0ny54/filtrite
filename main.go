@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
+
 	"xarantolus/filtrite/util"
 )
 
@@ -16,109 +17,245 @@ const (
 	distDir = "dist"
 	logDir  = "logs"
 
-	// This is the "kMaxBodySize" from https://github.com/bromite/bromite/blob/6f40f8341ab3fbcab458c10fe7b6bbcb8f881404/build/patches/Bromite-subresource-adblocker.patch#L1160-L1161
-	bromiteMaxFilterSize = 1024 * 1024 * 20
+	// Chromium/Bromite kMaxBodySize.
+	// Bromite accepts filter files up to 20 MiB.
+	bromiteMaxFilterSize = 20 * 1024 * 1024
 )
 
-// generateFilterList generates a filter list from the listTextFile
-func generateFilterList(listTextFile string) (err error) {
+type generationError struct {
+	file string
+	err  error
+}
 
-	var listName = strings.Map(
-		func(r rune) rune {
-			if unicode.IsSpace(r) {
-				return '_'
-			}
+func safeListName(path string) string {
+	name := strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+	name = strings.TrimSpace(name)
+
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsSpace(r):
+			return '_'
+		case r == '/', r == '\\':
+			return '_'
+		default:
 			return r
-		},
-		strings.TrimSuffix(filepath.Base(listTextFile), ".txt"),
-	)
+		}
+	}, name)
+
+	if name == "" {
+		return "filter-list"
+	}
+
+	return name
+}
+
+func isListFile(path string, info os.FileInfo) bool {
+	if info == nil || info.IsDir() {
+		return false
+	}
+
+	return strings.EqualFold(filepath.Ext(path), ".txt")
+}
+
+func ensureDirectories() error {
+	directories := []string{
+		listDir,
+		distDir,
+		logDir,
+	}
+
+	for _, directory := range directories {
+		if err := os.MkdirAll(directory, 0755); err != nil {
+			return fmt.Errorf("creating directory %q: %w", directory, err)
+		}
+	}
+
+	return nil
+}
+
+func generateFilterList(listTextFile string) error {
+	listName := safeListName(listTextFile)
+
+	outputFile := filepath.Join(distDir, listName+".dat")
+	logFile := filepath.Join(logDir, listName+".log")
 
 	fmt.Printf("::group::List: %s\n", listName)
 	defer fmt.Println("::endgroup::")
 
-	var (
-		outputFile = filepath.Join(distDir, listName+".dat")
-		logFile    = filepath.Join(logDir, listName+".log")
-	)
-
-	// Load all URLs
 	filterListURLs, err := util.ReadListFile(listTextFile)
 	if err != nil {
 		return fmt.Errorf("reading list file: %w", err)
 	}
 
-	// Create temporary directory and make sure we remove it afterwards
-	err = os.MkdirAll(tmpDir, os.ModePerm)
-	if err != nil {
-		return fmt.Errorf("creating temp directory for filter lists: %w", err)
+	if len(filterListURLs) == 0 {
+		return fmt.Errorf("no filter-list URLs found")
 	}
-	defer os.RemoveAll(tmpDir)
 
-	log.Printf("Downloading %d filter lists...\n", len(filterListURLs))
+	// Always start with a clean temporary directory. This prevents stale
+	// downloaded lists from being included in a later build.
+	if err := os.RemoveAll(tmpDir); err != nil {
+		return fmt.Errorf("removing temporary directory: %w", err)
+	}
 
-	// Actually download lists
+	if err := os.MkdirAll(tmpDir, 0755); err != nil {
+		return fmt.Errorf("creating temporary directory: %w", err)
+	}
+
+	defer func() {
+		if err := os.RemoveAll(tmpDir); err != nil {
+			log.Printf("warning: removing temporary directory: %v", err)
+		}
+	}()
+
+	log.Printf(
+		"Downloading %d filter lists for %s",
+		len(filterListURLs),
+		listName,
+	)
+
 	paths, err := util.DownloadURLs(filterListURLs, tmpDir)
 	if err != nil {
 		return fmt.Errorf("downloading filter lists: %w", err)
 	}
 
-	log.Printf("Got %d/%d\n", len(paths), len(filterListURLs))
-
 	if len(paths) == 0 {
-		return fmt.Errorf("all lists failed to download")
+		return fmt.Errorf(
+			"all filter lists failed to download: %d attempted",
+			len(filterListURLs),
+		)
 	}
 
-	// make sure dir exists
-	err = os.MkdirAll(filepath.Dir(outputFile), 0664)
-	if err != nil {
+	log.Printf(
+		"Downloaded %d/%d filter lists",
+		len(paths),
+		len(filterListURLs),
+	)
+
+	if err := os.MkdirAll(distDir, 0755); err != nil {
 		return fmt.Errorf("creating distribution directory: %w", err)
 	}
 
-	log.Println("Converting ruleset...")
-	err = util.GenerateDistributableList(paths, outputFile, logFile)
-	if err != nil {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
+		return fmt.Errorf("creating log directory: %w", err)
+	}
+
+	// Remove a previous output before generating the new file. This avoids
+	// accidentally serving an old valid-looking .dat file after a failed build.
+	if err := os.Remove(outputFile); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("removing previous output %q: %w", outputFile, err)
+	}
+
+	log.Printf("Converting ruleset for legacy Bromite engine")
+
+	if err := util.GenerateDistributableList(paths, outputFile, logFile); err != nil {
 		return fmt.Errorf("generating distributable list: %w", err)
 	}
 
-	// Check if output file is larger than 10mb
 	fileInfo, err := os.Stat(outputFile)
 	if err != nil {
-		return fmt.Errorf("getting filter output file info: %w", err)
-	}
-	if fileInfo.Size() > bromiteMaxFilterSize {
-		return fmt.Errorf("filter list is too large for Bromite (%d bytes > %d bytes)", fileInfo.Size(), bromiteMaxFilterSize)
+		return fmt.Errorf("checking generated output: %w", err)
 	}
 
-	err = util.AppendReleaseList(listTextFile, len(paths), len(filterListURLs))
-	if err != nil {
+	if fileInfo.Size() == 0 {
+		return fmt.Errorf("generated filter file is empty")
+	}
+
+	if fileInfo.Size() > bromiteMaxFilterSize {
+		return fmt.Errorf(
+			"filter list is too large for Bromite: %d bytes > %d bytes",
+			fileInfo.Size(),
+			bromiteMaxFilterSize,
+		)
+	}
+
+	log.Printf(
+		"Generated %s: %d bytes",
+		outputFile,
+		fileInfo.Size(),
+	)
+
+	if err := util.AppendReleaseList(
+		listTextFile,
+		len(paths),
+		len(filterListURLs),
+	); err != nil {
 		return fmt.Errorf("generating release list: %w", err)
 	}
 
 	return nil
 }
 
-func main() {
-	err := filepath.Walk(listDir, func(path string, d os.FileInfo, err error) error {
-		if err != nil {
-			log.Printf("Walk: Error: %s\n", err.Error())
-			return nil
-		}
-		if d.IsDir() {
-			return nil
-		}
+func processLists() []generationError {
+	var failures []generationError
 
-		if !strings.HasSuffix(path, ".txt") {
-			log.Printf("File %q was not processed because it does not end with \".txt\"\n", path)
-			return nil
-		}
+	err := filepath.Walk(
+		listDir,
+		func(path string, info os.FileInfo, walkErr error) error {
+			if walkErr != nil {
+				failures = append(failures, generationError{
+					file: path,
+					err:  walkErr,
+				})
+				return nil
+			}
 
-		err = generateFilterList(path)
-		if err != nil {
-			log.Printf("Error while generating filter for %q: %s\n", path, err.Error())
-		}
-		return err
-	})
+			if !isListFile(path, info) {
+				return nil
+			}
+
+			if err := generateFilterList(path); err != nil {
+				failures = append(failures, generationError{
+					file: path,
+					err:  err,
+				})
+
+				log.Printf(
+					"ERROR: failed to generate %q: %v",
+					path,
+					err,
+				)
+			}
+
+			return nil
+		},
+	)
+
 	if err != nil {
-		panic("error while walking: " + err.Error())
+		failures = append(failures, generationError{
+			file: listDir,
+			err:  err,
+		})
 	}
+
+	return failures
+}
+
+func main() {
+	log.SetFlags(log.Ldate | log.Ltime)
+
+	if err := ensureDirectories(); err != nil {
+		log.Fatalf("initialization failed: %v", err)
+	}
+
+	failures := processLists()
+
+	if len(failures) == 0 {
+		log.Println("All filter lists generated successfully")
+		return
+	}
+
+	log.Printf(
+		"Generation completed with %d failure(s)",
+		len(failures),
+	)
+
+	for _, failure := range failures {
+		log.Printf(
+			"FAILED %s: %v",
+			failure.file,
+			failure.err,
+		)
+	}
+
+	os.Exit(1)
 }
