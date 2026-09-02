@@ -16,12 +16,13 @@ These lists are regularly updated automatically using GitHub Actions.
 
 #### :department_store: **My Free DNS Server, free** <a name="dns server"></a>
 
-On [My Free DNS](https://vercel.com) you can use HaGeZi Blocklists MultiPro+TIF.
+On [My Free DNS] you can use HaGeZi Blocklists Multi Pro + TIF.
 
-| HaGeZi Blocklists | DNS-over-HTTPS |
-| --- | --- |
-| Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query`
-|
+| Hagezi Blocklists | DNS-over-HTTPS |
+|:---------------|:---------------|
+| Multi Pro + TIF | `https://xdns.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query` |
+
 
 ### Advanced blocking
 The normal Bromite ad blocking engine does not support all blocking formats. However, since the introduction of user scripts, it has become possible to block even more annoying elements. If you want more blockers (e.g. for cookie prompts), see my [custom Bromite user scripts repository](https://github.com/xarantolus/bromite-userscripts/).
