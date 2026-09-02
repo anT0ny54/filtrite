@@ -10,10 +10,18 @@ You can choose any list from the table, then hold the name to copy its link. Add
 
 Alternatively, you can [go here to search forks of this project](https://filterlists.010.one/) for more lists, e.g. for other countries.
 
-
 These lists are regularly updated automatically using GitHub Actions.
 
 **Note**: I'm not 100% sure if all list formats that are used are actually supported by [the ruleset generation tool](https://github.com/xarantolus/subresource_filter_tools) (as the output indicates some failures). If you have a comment on that, please open an issue :)
+
+#### :department_store: **My Free DNS Server, free** <a name="dns server"></a>
+
+On [My Free DNS](https://snapdeploy.dev) you can use HaGeZi Blocklists MultiPro+TIF.
+
+| HaGeZi Blocklists | DNS-over-HTTPS |
+| --- | --- |
+| MultiPro + TIF | `https://freedns-0a3e2.containers.snapdeploy.app/api/doh/dns-query`
+|
 
 ### Advanced blocking
 The normal Bromite ad blocking engine does not support all blocking formats. However, since the introduction of user scripts, it has become possible to block even more annoying elements. If you want more blockers (e.g. for cookie prompts), see my [custom Bromite user scripts repository](https://github.com/xarantolus/bromite-userscripts/).
