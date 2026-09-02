@@ -16,11 +16,11 @@ These lists are regularly updated automatically using GitHub Actions.
 
 #### :department_store: **My Free DNS Server, free** <a name="dns server"></a>
 
-On [My Free DNS](https://snapdeploy.dev) you can use HaGeZi Blocklists MultiPro+TIF.
+On [My Free DNS](https://https://vercel.com) you can use HaGeZi Blocklists MultiPro+TIF.
 
 | HaGeZi Blocklists | DNS-over-HTTPS |
 | --- | --- |
-| MultiPro + TIF | `https://freedns-0a3e2.containers.snapdeploy.app/api/doh/dns-query`
+| MultiPro + TIF | `https://freedns-kappa.vercel.app/api/doh/dns-query`
 |
 
 ### Advanced blocking
