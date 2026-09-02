@@ -16,7 +16,7 @@ These lists are regularly updated automatically using GitHub Actions.
 
 #### :department_store: **My Free DNS Server, free** <a name="dns server"></a>
 
-On [My Free DNS](https://https://vercel.com) you can use HaGeZi Blocklists MultiPro+TIF.
+On [My Free DNS](https://vercel.com) you can use HaGeZi Blocklists MultiPro+TIF.
 
 | HaGeZi Blocklists | DNS-over-HTTPS |
 | --- | --- |
