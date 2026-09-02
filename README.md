@@ -20,7 +20,7 @@ On [My Free DNS](https://vercel.com) you can use HaGeZi Blocklists MultiPro+TIF.
 
 | HaGeZi Blocklists | DNS-over-HTTPS |
 | --- | --- |
-| MultiPro + TIF | `https://freedns-kappa.vercel.app/api/doh/dns-query`
+| Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query`
 |
 
 ### Advanced blocking
