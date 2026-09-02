@@ -54,6 +54,15 @@ To create a new list:
 Another thing to note is that [GitHub disables scheduled workflows after 60 days](https://docs.github.com/en/actions/managing-workflow-runs/disabling-and-enabling-a-workflow), meaning that you sometimes have to commit something to keep your fork "alive".
 
 
+# ⚡ Bandwidth Hero Server
+
+> A lightweight image optimization proxy designed to reduce bandwidth usage and speed up web browsing.
+
+Bandwidth Hero Server fetches remote images, compresses them, and delivers optimized versions to the client. It helps reduce data consumption while improving loading performance.
+
+🖥️ If you want, you can see this [Bandwidth Hero](https://bhserv.netlify.app/)
+
+
 ### [License](LICENSE)
 This is free as in freedom software. Do whatever you like with it.
 
