@@ -1,37 +1,37 @@
 package util
 
 import (
-\t"context"
-\t"crypto/sha256"
-\t"encoding/hex"
-\t"errors"
-\t"fmt"
-\t"io"
-\t"log"
-\t"net/http"
-\t"net/url"
-\t"os"
-\t"path/filepath"
-\t"sort"
-\t"strings"
-\t"sync"
-\t"time"
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
 )
 
 const (
-\tDefaultDownloadWorkers = 6
-\tDefaultDownloadRetries = 3
-\tDefaultDownloadTimeout = 30 * time.Second
+	DefaultDownloadWorkers = 6
+	DefaultDownloadRetries = 3
+	DefaultDownloadTimeout = 30 * time.Second
 )
 
 var defaultHTTPClient = &http.Client{
-\tTimeout: DefaultDownloadTimeout,
-\tCheckRedirect: func(req *http.Request, via []*http.Request) error {
-\t\tif len(via) >= 5 {
-\t\t\treturn errors.New("too many redirects")
-\t\t}
-\t\treturn nil
-\t},
+	Timeout: DefaultDownloadTimeout,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many redirects")
+		}
+		return nil
+	},
 }
 
 // DownloadURLs downloads all valid HTTP(S) URLs into tempDir using a bounded
@@ -44,198 +44,198 @@ var defaultHTTPClient = &http.Client{
 //   - Fails fast if the context is cancelled.
 //   - Returns all successfully downloaded paths plus an error if any failed.
 func DownloadURLs(inputURLs []string, tempDir string) (outputPaths []string, err error) {
-\treturn DownloadURLsContext(context.Background(), inputURLs, tempDir, DefaultDownloadWorkers, DefaultDownloadRetries, DefaultDownloadTimeout)
+	return DownloadURLsContext(context.Background(), inputURLs, tempDir, DefaultDownloadWorkers, DefaultDownloadRetries, DefaultDownloadTimeout)
 }
 
 // DownloadURLsContext is like DownloadURLs but with explicit concurrency and timeout controls.
 func DownloadURLsContext(
-\tctx context.Context,
-\tinputURLs []string,
-\ttempDir string,
-\tworkers, retries int,
-\ttimeout time.Duration,
+	ctx context.Context,
+	inputURLs []string,
+	tempDir string,
+	workers, retries int,
+	timeout time.Duration,
 ) (outputPaths []string, err error) {
-\tif workers <= 0 {
-\t\tworkers = DefaultDownloadWorkers
-\t}
-\tif retries <= 0 {
-\t\tretries = DefaultDownloadRetries
-\t}
-\tif timeout <= 0 {
-\t\ttimeout = DefaultDownloadTimeout
-\t}
+	if workers <= 0 {
+		workers = DefaultDownloadWorkers
+	}
+	if retries <= 0 {
+		retries = DefaultDownloadRetries
+	}
+	if timeout <= 0 {
+		timeout = DefaultDownloadTimeout
+	}
 
-\tclient := &http.Client{
-\t\tTimeout: timeout,
-\t\tCheckRedirect: func(req *http.Request, via []*http.Request) error {
-\t\t\tif len(via) >= 5 {
-\t\t\t\treturn errors.New("too many redirects")
-\t\t\t}
-\t\t\treturn nil
-\t\t},
-\t}
+	client := &http.Client{
+		Timeout: timeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("too many redirects")
+			}
+			return nil
+		},
+	}
 
-\t// Validate and normalize URLs first.
-\tvalidURLs := make([]string, 0, len(inputURLs))
-\tfor _, raw := range inputURLs {
-\t\tu := strings.TrimSpace(raw)
-\t\tif u == "" {
-\t\t\tcontinue
-\t\t}
-\t\tparsed, parseErr := url.Parse(u)
-\t\tif parseErr != nil || parsed.Host == "" {
-\t\t\tlog.Printf("[Warning]: skipping invalid URL: %s", u)
-\t\t\tcontinue
-\t\t}
-\t\tif parsed.Scheme != "http" && parsed.Scheme != "https" {
-\t\t\tlog.Printf("[Warning]: skipping non-HTTP(S) URL: %s", u)
-\t\t\tcontinue
-\t\t}
-\t\tvalidURLs = append(validURLs, u)
-\t}
+	// Validate and normalize URLs first.
+	validURLs := make([]string, 0, len(inputURLs))
+	for _, raw := range inputURLs {
+		u := strings.TrimSpace(raw)
+		if u == "" {
+			continue
+		}
+		parsed, parseErr := url.Parse(u)
+		if parseErr != nil || parsed.Host == "" {
+			log.Printf("[Warning]: skipping invalid URL: %s", u)
+			continue
+		}
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			log.Printf("[Warning]: skipping non-HTTP(S) URL: %s", u)
+			continue
+		}
+		validURLs = append(validURLs, u)
+	}
 
-\tif len(validURLs) == 0 {
-\t\treturn nil, errors.New("no valid HTTP(S) URLs to download")
-\t}
+	if len(validURLs) == 0 {
+		return nil, errors.New("no valid HTTP(S) URLs to download")
+	}
 
-\tif err := os.MkdirAll(tempDir, 0o755); err != nil {
-\t\treturn nil, fmt.Errorf("creating temp directory %q: %w", tempDir, err)
-\t}
+	if err := os.MkdirAll(tempDir, 0o755); err != nil {
+		return nil, fmt.Errorf("creating temp directory %q: %w", tempDir, err)
+	}
 
-\ttype job struct {
-\t\turl string
-\t}
-\ttype result struct {
-\t\turl  string
-\t\tpath string
-\t\terr  error
-\t}
+	type job struct {
+		url string
+	}
+	type result struct {
+		url  string
+		path string
+		err  error
+	}
 
-\tjobs := make(chan job, len(validURLs))
-\tresults := make(chan result, len(validURLs))
+	jobs := make(chan job, len(validURLs))
+	results := make(chan result, len(validURLs))
 
-\tvar wg sync.WaitGroup
-\twg.Add(workers)
+	var wg sync.WaitGroup
+	wg.Add(workers)
 
-\tfor i := 0; i < workers; i++ {
-\t\tgo func() {
-\t\t\tdefer wg.Done()
-\t\t\tfor j := range jobs {
-\t\t\t\tpath, err := downloadWithRetry(ctx, client, j.url, tempDir, retries)
-\t\t\t\tresults <- result{
-\t\t\t\t\turl:  j.url,
-\t\t\t\t\tpath: path,
-\t\t\t\t\terr:  err,
-\t\t\t\t}
-\t\t\t}
-\t\t}()
-\t}
+	for i := 0; i < workers; i++ {
+		go func() {
+			defer wg.Done()
+			for j := range jobs {
+				path, err := downloadWithRetry(ctx, client, j.url, tempDir, retries)
+				results <- result{
+					url:  j.url,
+					path: path,
+					err:  err,
+				}
+			}
+		}()
+	}
 
-\tgo func() {
-\t\tfor _, u := range validURLs {
-\t\t\tjobs <- job{url: u}
-\t\t}
-\t\tclose(jobs)
-\t}()
+	go func() {
+		for _, u := range validURLs {
+			jobs <- job{url: u}
+		}
+		close(jobs)
+	}()
 
-\tgo func() {
-\t\twg.Wait()
-\t\tclose(results)
-\t}()
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
-\tvar (
-\t\tsuccesses []result
-\t\tfailures  []result
-\t)
+	var (
+		successes []result
+		failures  []result
+	)
 
-\tfor r := range results {
-\t\tif r.err != nil {
-\t\t\tfailures = append(failures, r)
-\t\t\tlog.Printf("[Warning]: failed to download %s: %v", r.url, r.err)
-\t\t} else {
-\t\t\tsuccesses = append(successes, r)
-\t\t}
-\t}
+	for r := range results {
+		if r.err != nil {
+			failures = append(failures, r)
+			log.Printf("[Warning]: failed to download %s: %v", r.url, r.err)
+		} else {
+			successes = append(successes, r)
+		}
+	}
 
-\t// Sort for determinism (same order as input after filtering).
-\tsort.Slice(successes, func(i, j int) bool {
-\t\treturn successes[i].url < successes[j].url
-\t})
+	// Sort for determinism (same order as input after filtering).
+	sort.Slice(successes, func(i, j int) bool {
+		return successes[i].url < successes[j].url
+	})
 
-\toutputPaths = make([]string, 0, len(successes))
-\tfor _, s := range successes {
-\t\toutputPaths = append(outputPaths, s.path)
-\t}
+	outputPaths = make([]string, 0, len(successes))
+	for _, s := range successes {
+		outputPaths = append(outputPaths, s.path)
+	}
 
-\tif len(failures) > 0 {
-\t\terr = fmt.Errorf("%d/%d URLs failed to download", len(failures), len(validURLs))
-\t}
+	if len(failures) > 0 {
+		err = fmt.Errorf("%d/%d URLs failed to download", len(failures), len(validURLs))
+	}
 
-\treturn outputPaths, err
+	return outputPaths, err
 }
 
 func downloadWithRetry(ctx context.Context, client *http.Client, rawURL, tempDir string, retries int) (string, error) {
-\tvar lastErr error
+	var lastErr error
 
-\tfor attempt := 0; attempt <= retries; attempt++ {
-\t\tif attempt > 0 {
-\t\t\tdelay := time.Duration(attempt*attempt) * 500 * time.Millisecond
-\t\t\tselect {
-\t\t\tcase <-ctx.Done():
-\t\t\t\treturn "", ctx.Err()
-\t\t\tcase <-time.After(delay):
-\t\t\t}
-\t\t}
+	for attempt := 0; attempt <= retries; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(attempt*attempt) * 500 * time.Millisecond
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(delay):
+			}
+		}
 
-\t\tpath, err := downloadOnce(ctx, client, rawURL, tempDir)
-\t\tif err == nil {
-\t\t\treturn path, nil
-\t\t}
+		path, err := downloadOnce(ctx, client, rawURL, tempDir)
+		if err == nil {
+			return path, nil
+		}
 
-\t\tlastErr = err
-\t}
+		lastErr = err
+	}
 
-\treturn "", lastErr
+	return "", lastErr
 }
 
 func downloadOnce(ctx context.Context, client *http.Client, rawURL, tempDir string) (string, error) {
-\treq, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-\tif err != nil {
-\t\treturn "", fmt.Errorf("create request: %w", err)
-\t}
-\treq.Header.Set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
-\treq.Header.Set("User-Agent", "filtrite/optimized")
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
+	req.Header.Set("User-Agent", "filtrite/optimized")
 
-\tresp, err := client.Do(req)
-\tif err != nil {
-\t\treturn "", err
-\t}
-\tdefer resp.Body.Close()
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
 
-\tif resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-\t\t// Drain a bit to allow connection reuse.
-\t\tio.CopyN(io.Discard, resp.Body, 16*1024)
-\t\treturn "", fmt.Errorf("unexpected HTTP status %s", resp.Status)
-\t}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		// Drain a bit to allow connection reuse.
+		io.CopyN(io.Discard, resp.Body, 16*1024)
+		return "", fmt.Errorf("unexpected HTTP status %s", resp.Status)
+	}
 
-\tfilename := generateFilename(rawURL)
-\tpath := filepath.Join(tempDir, filename)
+	filename := generateFilename(rawURL)
+	path := filepath.Join(tempDir, filename)
 
-\tf, err := os.Create(path)
-\tif err != nil {
-\t\treturn "", fmt.Errorf("create file %q: %w", path, err)
-\t}
-\tdefer f.Close()
+	f, err := os.Create(path)
+	if err != nil {
+		return "", fmt.Errorf("create file %q: %w", path, err)
+	}
+	defer f.Close()
 
-\tif _, err := io.Copy(f, io.LimitReader(resp.Body, 100*1024*1024)); err != nil {
-\t\treturn "", fmt.Errorf("write file %q: %w", path, err)
-\t}
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, 100*1024*1024)); err != nil {
+		return "", fmt.Errorf("write file %q: %w", path, err)
+	}
 
-\treturn path, nil
+	return path, nil
 }
 
 func generateFilename(urlStr string) string {
-\th := sha256.New()
-\t_, _ = h.Write([]byte(urlStr))
-\treturn hex.EncodeToString(h.Sum(nil)) + ".txt"
+	h := sha256.New()
+	_, _ = h.Write([]byte(urlStr))
+	return hex.EncodeToString(h.Sum(nil)) + ".txt"
 }

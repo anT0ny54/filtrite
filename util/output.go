@@ -1,64 +1,63 @@
 package util
 
 import (
-\t"fmt"
-\t"os"
-\t"path/filepath"
-\t"strings"
-\t"text/template"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"text/template"
 )
 
 const (
-\treleaseFile = "release.md"
+	releaseFile = "release.md"
 
-\tlineTemplate = "* {{if .Repo}}[`{{.ListName}}`](https://github.com/{{.Repo}}/releases/latest/download/{{.ListName}}.dat){{else}}`{{.ListName}}`{{end}}: updated {{.GotCount}}/{{.FullCount}} list{{if ne .FullCount 1}}s{{end}}{{if ne .ErrorCount 0}}, {{if eq .ErrorCount 1}}one error{{else}}{{.ErrorCount}} errors{{end}}{{end}}
-"
+	lineTemplate = "* {{if .Repo}}[`{{.ListName}}`](https://github.com/{{.Repo}}/releases/latest/download/{{.ListName}}.dat){{else}}`{{.ListName}}`{{end}}: updated {{.GotCount}}/{{.FullCount}} list{{if gt .ErrorCount 0}} ({{.ErrorCount}} failed){{end}}\n"
 )
 
 var tmpl = template.Must(template.New("releaseLine").Parse(lineTemplate))
 
 type info struct {
-\tListName string
-\tRepo     string
+	ListName string
+	Repo     string
 
-\tGotCount  int
-\tFullCount int
+	GotCount  int
+	FullCount int
 
-\tErrorCount int
+	ErrorCount int
 }
 
 // AppendReleaseList appends a line describing this list generation run to release.md.
 // It writes atomically via a temp file + rename to avoid partial lines on failure.
 func AppendReleaseList(fn string, gotCount, fullCount int) (err error) {
-\tfriendlyName := strings.TrimSuffix(filepath.Base(fn), ".txt")
+	friendlyName := strings.TrimSuffix(filepath.Base(fn), ".txt")
 
-\tdata := info{
-\t\tListName:   friendlyName,
-\t\tRepo:       os.Getenv("GITHUB_REPOSITORY"),
-\t\tGotCount:   gotCount,
-\t\tFullCount:  fullCount,
-\t\tErrorCount: fullCount - gotCount,
-\t}
+	data := info{
+		ListName:   friendlyName,
+		Repo:       os.Getenv("GITHUB_REPOSITORY"),
+		GotCount:   gotCount,
+		FullCount:  fullCount,
+		ErrorCount: fullCount - gotCount,
+	}
 
-\tvar buf strings.Builder
-\tif err := tmpl.Execute(&buf, data); err != nil {
-\t\treturn fmt.Errorf("rendering release line: %w", err)
-\t}
+	var buf strings.Builder
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("rendering release line: %w", err)
+	}
 
-\t// Open for appending; create if missing.
-\tf, err := os.OpenFile(releaseFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-\tif err != nil {
-\t\treturn fmt.Errorf("opening release file: %w", err)
-\t}
-\tdefer f.Close()
+	// Open for appending; create if missing.
+	f, err := os.OpenFile(releaseFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("opening release file: %w", err)
+	}
+	defer f.Close()
 
-\tif _, err := f.WriteString(buf.String()); err != nil {
-\t\treturn fmt.Errorf("writing release line: %w", err)
-\t}
+	if _, err := f.WriteString(buf.String()); err != nil {
+		return fmt.Errorf("writing release line: %w", err)
+	}
 
-\tif err := f.Sync(); err != nil {
-\t\treturn fmt.Errorf("flushing release file: %w", err)
-\t}
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("flushing release file: %w", err)
+	}
 
-\treturn nil
+	return nil
 }
