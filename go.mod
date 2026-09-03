@@ -1,3 +1,3 @@
-module xarantolus/filtrite
+module ant0ny54/filtrite
 
-go 1.15
+go 1.24
