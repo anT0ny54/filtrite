@@ -21,7 +21,7 @@ On [My Free DNS] you can use HaGeZi Blocklists Multi Pro + TIF.
 | Hagezi Blocklists | DNS-over-HTTPS |
 |:---------------|:---------------|
 | Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query` (Recommended) |
-| Multi Pro + TIF | `https://xdns.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
 
 
 ### Advanced blocking
