@@ -3,62 +3,80 @@ package util
 import (
 	"bufio"
 	"fmt"
-	"log"
 	"net/url"
 	"os"
 	"sort"
 	"strings"
 )
 
-// ReadListFile returns all unique, valid HTTP(S) URLs from the given file,
-// sorted lexicographically. Lines starting with '#' are treated as comments.
-func ReadListFile(fn string) (entries []string, err error) {
+const (
+	maxListLineBytes  = 2 * 1024 * 1024 // 2 MiB
+	initialURLCapacity = 256
+)
+
+// ReadListFile returns unique, valid HTTP(S) URLs from the given file,
+// sorted lexicographically.
+//
+// Empty lines and lines whose first non-whitespace character is '#'
+// are ignored. Invalid and non-HTTP(S) entries are skipped.
+func ReadListFile(fn string) (urls []string, err error) {
 	f, err := os.Open(fn)
 	if err != nil {
 		return nil, fmt.Errorf("open list file %q: %w", fn, err)
 	}
-	defer f.Close()
 
-	seen := make(map[string]struct{})
-	var list []string
+	defer func() {
+		if closeErr := f.Close(); err == nil && closeErr != nil {
+			urls = nil
+			err = fmt.Errorf("close list file %q: %w", fn, closeErr)
+		}
+	}()
+
+	urls = make([]string, 0, initialURLCapacity)
+	seen := make(map[string]struct{}, initialURLCapacity)
 
 	scanner := bufio.NewScanner(f)
-	// Allow reasonably long lines; adjust if needed.
-	const maxLineBytes = 2 * 1024 * 1024
-	buf := make([]byte, 0, 64*1024)
-	scanner.Buffer(buf, maxLineBytes)
+	scanner.Buffer(
+		make([]byte, 64*1024),
+		maxListLineBytes,
+	)
 
-	lineNum := 0
 	for scanner.Scan() {
-		lineNum++
-		t := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(scanner.Text())
 
-		if t == "" || strings.HasPrefix(t, "#") {
-			continue
-		}
-
-		u, parseErr := url.ParseRequestURI(t)
-		if parseErr != nil || u.Host == "" {
-			log.Printf("Invalid URL at %s:%d: %q", fn, lineNum, t)
-			continue
-		}
-		if u.Scheme != "http" && u.Scheme != "https" {
-			log.Printf("Non-HTTP(S) URL at %s:%d: %q", fn, lineNum, t)
+		// Ignore blank lines and comments.
+		if line == "" || strings.HasPrefix(line, "#") {
 			continue
 		}
 
-		if _, exists := seen[t]; exists {
-			log.Printf("Duplicate URL %q will only be downloaded once", t)
+		parsed, parseErr := url.ParseRequestURI(line)
+		if parseErr != nil {
 			continue
 		}
-		seen[t] = struct{}{}
-		list = append(list, t)
+
+		// Require an absolute HTTP(S) URL with a valid hostname.
+		if parsed.Hostname() == "" {
+			continue
+		}
+
+		if parsed.Scheme != "http" && parsed.Scheme != "https" {
+			continue
+		}
+
+		// Ignore exact duplicates.
+		if _, exists := seen[line]; exists {
+			continue
+		}
+
+		seen[line] = struct{}{}
+		urls = append(urls, line)
 	}
 
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading list file %q: %w", fn, err)
+	if scanErr := scanner.Err(); scanErr != nil {
+		return nil, fmt.Errorf("read list file %q: %w", fn, scanErr)
 	}
 
-	sort.Strings(list)
-	return list, nil
+	sort.Strings(urls)
+
+	return urls, nil
 }
