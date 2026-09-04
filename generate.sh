@@ -1,78 +1,208 @@
 #!/usr/bin/env bash
-set -euo pipefail
 
-echo "::group::Init"
+set -Eeuo pipefail
 
-log () {
-    echo `date +"%m/%d/%Y %H:%M:%S"` "$@"
+readonly BINARY="filtrite"
+readonly DEP_DIR="deps"
+readonly DIST_DIR="dist"
+readonly LOG_DIR="logs"
+
+readonly SELF_BUILT_URL="https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip"
+readonly CROMITE_URL="https://github.com/uazo/cromite/releases/latest/download/ruleset_converter"
+
+WORK_DIR=""
+
+log() {
+    printf '[%s] %s\n' "$(date '+%m/%d/%Y %H:%M:%S')" "$*"
+}
+
+die() {
+    log "ERROR: $*"
+    exit 1
 }
 
 cleanup() {
-    rm -f filtrite >> /dev/null 2>&1
+    local status=$?
+
+    if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
+        rm -rf "$WORK_DIR" || true
+    fi
+
+    rm -f "$BINARY" || true
+
+    exit "$status"
 }
 
-cleanup
+trap cleanup EXIT
 
-# Make sure all dependencies are installed
-sudo apt-get install -y unzip wget || true
+require_command() {
+    command -v "$1" >/dev/null 2>&1
+}
 
-echo "::endgroup::"
+install_dependencies() {
+    local missing=()
 
-echo "::group::Build executable"
-log "Building"
-go build -v -o filtrite
-echo "::endgroup::"
+    require_command unzip || missing+=("unzip")
+    require_command wget || missing+=("wget")
 
-echo "::group::Downloading latest ruleset_converter build"
+    if [[ "${#missing[@]}" -eq 0 ]]; then
+        return
+    fi
 
-install_bromite_ruleset_converter() {
-    log "Downloading from latest Cromite release"
-    rm -rf deps || true
-    mkdir -p deps
-    wget -O "deps/ruleset_converter" "https://github.com/uazo/cromite/releases/latest/download/ruleset_converter"
+    log "Missing dependencies: ${missing[*]}"
+
+    require_command apt-get || {
+        die "apt-get is required to install: ${missing[*]}"
+    }
+
+    if [[ "$EUID" -eq 0 ]]; then
+        apt-get update
+        apt-get install -y "${missing[@]}"
+    else
+        require_command sudo || {
+            die "sudo is required to install: ${missing[*]}"
+        }
+
+        sudo apt-get update
+        sudo apt-get install -y "${missing[@]}"
+    fi
+}
+
+download_file() {
+    local url="$1"
+    local destination="$2"
+
+    wget \
+        --fail \
+        --location \
+        --retry-connrefused \
+        --tries=3 \
+        --timeout=30 \
+        --output-document="$destination" \
+        "$url"
 }
 
 install_selfbuilt_ruleset_converter() {
-    log "Downloading from latest self-built release"
-    rm -rf deps || true
-    mkdir -p deps
+    local archive="$WORK_DIR/subresource_filter_tools_linux.zip"
+    local converter_path
 
-    wget -O "subresource_filter_tools_linux.zip" "https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip"
+    log "Downloading latest self-built ruleset_converter"
 
-    unzip -ou "subresource_filter_tools_linux.zip" -d deps
+    rm -rf "$DEP_DIR"
+    mkdir -p "$DEP_DIR"
 
-    rm "subresource_filter_tools_linux.zip"
+    download_file "$SELF_BUILT_URL" "$archive"
+    unzip -oq "$archive" -d "$DEP_DIR"
+
+    converter_path="$(
+        find "$DEP_DIR" \
+            -type f \
+            -name "ruleset_converter" \
+            -print -quit
+    )"
+
+    if [[ -z "$converter_path" ]]; then
+        log "Self-built archive does not contain ruleset_converter"
+        return 1
+    fi
+
+    if [[ "$converter_path" != "$DEP_DIR/ruleset_converter" ]]; then
+        cp -- "$converter_path" "$DEP_DIR/ruleset_converter"
+    fi
+
+    chmod +x "$DEP_DIR/ruleset_converter"
+
+    [[ -s "$DEP_DIR/ruleset_converter" ]] || {
+        log "Self-built ruleset_converter is empty"
+        return 1
+    }
+
+    log "Using self-built ruleset_converter"
 }
 
-# Use more up to date first, but if that fails, fall back to old bromite tool
-install_selfbuilt_ruleset_converter || install_bromite_ruleset_converter
+install_cromite_ruleset_converter() {
+    local destination="$DEP_DIR/ruleset_converter"
 
-echo "::endgroup::"
+    log "Downloading latest Cromite ruleset_converter"
 
+    rm -rf "$DEP_DIR"
+    mkdir -p "$DEP_DIR"
 
-echo "::group::Other setup steps"
-chmod +x filtrite
-chmod +x deps/ruleset_converter
-mkdir -p dist
-mkdir -p logs
-echo "::endgroup::"
+    download_file "$CROMITE_URL" "$destination"
+    chmod +x "$destination"
 
-# If the default list file exists, we overwrite it with the actual official list
-if [[ -f "lists/bromite-default.txt" ]]; then
-    echo "::group::Downloading official list"
-    wget -O "lists/bromite-default.txt" "https://raw.githubusercontent.com/bromite/filters/master/lists.txt"
+    [[ -s "$destination" ]] || {
+        die "Downloaded Cromite ruleset_converter is empty"
+    }
+
+    log "Using Cromite ruleset_converter"
+}
+
+install_ruleset_converter() {
+    if install_selfbuilt_ruleset_converter; then
+        return
+    fi
+
+    log "Self-built download failed; falling back to Cromite"
+    install_cromite_ruleset_converter
+}
+
+build_filtrite() {
+    log "Building filtrite"
+
+    go build \
+        -trimpath \
+        -v \
+        -o "$BINARY" \
+        .
+
+    chmod +x "$BINARY"
+
+    [[ -x "$BINARY" ]] || {
+        die "Build did not produce $BINARY"
+    }
+}
+
+validate_input_list() {
+    [[ -f "lists/adblock.txt" ]] || {
+        die "Required list file not found: lists/adblock.txt"
+    }
+
+    [[ -s "lists/adblock.txt" ]] || {
+        die "List file is empty: lists/adblock.txt"
+    }
+
+    log "Using local list file: lists/adblock.txt"
+}
+
+main() {
+    WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/filtrite-build.XXXXXX")"
+
+    echo "::group::Init"
+    log "Initializing build"
+    install_dependencies
+    validate_input_list
     echo "::endgroup::"
-fi
 
-# Now that everything is set up, we can start actually generating filter lists
-./filtrite
+    echo "::group::Build executable"
+    build_filtrite
+    echo "::endgroup::"
 
-echo "::group::Cleanup"
-cleanup
+    echo "::group::Download ruleset converter"
+    install_ruleset_converter
+    echo "::endgroup::"
 
-# Reset the downloaded list to the previous text, in case this is run locally
-if [[ -f "lists/bromite-default.txt" ]]; then
-    git restore lists/bromite-default.txt
-fi
+    echo "::group::Prepare directories"
+    mkdir -p "$DIST_DIR" "$LOG_DIR"
+    echo "::endgroup::"
 
-echo "::endgroup::"
+    echo "::group::Generate adblock filter list"
+    "./$BINARY"
+    echo "::endgroup::"
+
+    echo "::group::Cleanup"
+    log "Generation completed successfully"
+    echo "::endgroup::"
+}
+
+main "$@"
