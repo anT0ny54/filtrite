@@ -66,4 +66,4 @@ Bandwidth Hero Server fetches remote images, compresses them on the fly, and del
 **Support the Project:**
 If you find this tool useful, consider donating:
 - **Bitcoin:** `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
-- 
+  
