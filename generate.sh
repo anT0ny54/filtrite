@@ -7,10 +7,15 @@ readonly DEP_DIR="deps"
 readonly DIST_DIR="dist"
 readonly LOG_DIR="logs"
 
+readonly LIST_FILE="lists/adblock.txt"
+readonly LIST_URL="https://raw.githubusercontent.com/bromite/filters/master/lists.txt"
+
 readonly SELF_BUILT_URL="https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip"
 readonly CROMITE_URL="https://github.com/uazo/cromite/releases/latest/download/ruleset_converter"
 
 WORK_DIR=""
+LIST_BACKUP=""
+RESTORE_LIST=0
 
 log() {
     printf '[%s] %s\n' "$(date '+%m/%d/%Y %H:%M:%S')" "$*"
@@ -24,6 +29,14 @@ die() {
 cleanup() {
     local status=$?
 
+    if [[ "$RESTORE_LIST" -eq 1 &&
+          -n "$LIST_BACKUP" &&
+          -f "$LIST_BACKUP" ]]; then
+        if ! cp -p "$LIST_BACKUP" "$LIST_FILE"; then
+            log "WARNING: failed to restore $LIST_FILE"
+        fi
+    fi
+
     if [[ -n "$WORK_DIR" && -d "$WORK_DIR" ]]; then
         rm -rf "$WORK_DIR" || true
     fi
@@ -36,7 +49,9 @@ cleanup() {
 trap cleanup EXIT
 
 require_command() {
-    command -v "$1" >/dev/null 2>&1
+    local command_name="$1"
+
+    command -v "$command_name" >/dev/null 2>&1
 }
 
 install_dependencies() {
@@ -159,20 +174,40 @@ build_filtrite() {
     chmod +x "$BINARY"
 
     [[ -x "$BINARY" ]] || {
-        die "Build did not produce $BINARY"
+        die "Build did not produce an executable: $BINARY"
     }
 }
 
-validate_input_list() {
-    [[ -f "lists/adblock.txt" ]] || {
-        die "Required list file not found: lists/adblock.txt"
+prepare_directories() {
+    mkdir -p "$DIST_DIR" "$LOG_DIR"
+}
+
+download_list() {
+    local temporary_list
+
+    [[ -f "$LIST_FILE" ]] || {
+        log "$LIST_FILE does not exist; skipping official list download"
+        return
     }
 
-    [[ -s "lists/adblock.txt" ]] || {
-        die "List file is empty: lists/adblock.txt"
+    LIST_BACKUP="$WORK_DIR/adblock.txt.backup"
+
+    log "Backing up $LIST_FILE"
+    cp -p "$LIST_FILE" "$LIST_BACKUP"
+    RESTORE_LIST=1
+
+    temporary_list="$WORK_DIR/adblock.txt"
+
+    log "Downloading official filter list"
+
+    download_file "$LIST_URL" "$temporary_list"
+
+    [[ -s "$temporary_list" ]] || {
+        die "Downloaded filter list is empty"
     }
 
-    log "Using local list file: lists/adblock.txt"
+    # Replace only after the download has completed successfully.
+    mv -- "$temporary_list" "$LIST_FILE"
 }
 
 main() {
@@ -181,7 +216,6 @@ main() {
     echo "::group::Init"
     log "Initializing build"
     install_dependencies
-    validate_input_list
     echo "::endgroup::"
 
     echo "::group::Build executable"
@@ -193,10 +227,14 @@ main() {
     echo "::endgroup::"
 
     echo "::group::Prepare directories"
-    mkdir -p "$DIST_DIR" "$LOG_DIR"
+    prepare_directories
     echo "::endgroup::"
 
-    echo "::group::Generate adblock filter list"
+    echo "::group::Download adblock list"
+    download_list
+    echo "::endgroup::"
+
+    echo "::group::Generate filter lists"
     "./$BINARY"
     echo "::endgroup::"
 
