@@ -1,61 +1,69 @@
-## filtrite
+# ⚡ Filtrite
 
-filtrite builds filter lists for [Bromite](https://www.bromite.org/) and [Cromite](https://www.cromite.org/). Learn more about [Custom Ad Block Filters](https://www.bromite.org/custom-filters).
+Filtrite generates optimized filter lists for [Bromite](https://www.bromite.org/) and [Cromite](https://www.cromite.org/). Learn more about [Custom Ad Block Filters](https://www.bromite.org/custom-filters).
 
-# Lists
+## 📦 Available Lists
 
-Pick a list below, then tap and hold to copy its link. In Bromite, go to **Settings > AdBlock settings** and paste it into **Filters URL**.
+Pick a list below, then **tap and hold** to copy the link. In Bromite/Cromite, navigate to **Settings > AdBlock settings** and paste the link into the **Filters URL** field.
 
-| Link | Description |
-| --- | --- |
-| [Adblock Default](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) | AdGuard + EasyList + HaGeZi (Ads, Privacy, Annoyance, Threat Intelligence) [Sources](https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/refs/heads/main/sources.txt) |
+| List | Description | Link |
+| :--- | :--- | :--- |
+| **Adblock Default** | AdGuard + EasyList + HaGeZi (Ads, Privacy, Annoyance, Threat Intelligence) | [Download `.dat`](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) |
 
-More lists: [browse forks](https://filterlists.010.one/).
+👉 [Browse forks for more lists](https://filterlists.010.one/) | [View Sources](https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/refs/heads/main/sources.txt)
 
-Updated automatically with GitHub Actions.
+*Lists are updated automatically via GitHub Actions.*
 
-**Note:** Some formats may still fail in the generator. If you notice one, open an issue :)
+> [!NOTE]
+> Some formats may still encounter errors in the generator. If you spot one, please [open an issue](https://github.com/anT0ny54/filtrite/issues).
 
-#### :department_store: **My Free DNS Server — free** <a name="dns-server"></a>
+---
 
-Use HaGeZi Blocklists Multi Pro + TIF with [My Free DNS].
+## 🌐 My Free DNS Server
 
-| Hagezi Blocklists | DNS-over-HTTPS |
-| --- | --- |
-| Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query` (Recommended) |
-| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
+Experience high-performance filtering with HaGeZi Blocklists (Multi Pro + TIF) via **My Free DNS**.
 
-### Advanced blocking
+| Configuration | DNS-over-HTTPS (DoH) Endpoint |
+| :--- | :--- |
+| **Multi Pro + TIF** | `https://freedns-six.vercel.app/api/doh/dns-query` (Recommended) |
+| **Multi Pro + TIF** | `https://dnssix.netlify.app/api/doh/dns-query` |
 
-Bromite’s built-in blocker is good. User scripts make it better — especially for things like cookie banners. See my [custom Bromite user scripts repository](https://github.com/xarantolus/bromite-userscripts/).
+---
 
-### Using your own filter lists
+## 🛠️ Advanced Blocking
 
-1. Fork the repo.
-2. Enable GitHub Actions.
-3. Add a `.txt` file in `lists/` like `example-list.txt`.
-4. Add one filter list URL per line.
-5. Commit and push.
-6. Copy the `releases/latest/download/...` link from the release.
-7. Keep the generated file under 20 MB.
-8. Trim sources if needed, then rebuild.
+While the built-in blocker is powerful, user scripts take it to the next level—especially for eliminating stubborn cookie banners. Check out my [custom Bromite user scripts repository](https://github.com/xarantolus/bromite-userscripts/).
 
-GitHub disables scheduled workflows after 60 days, so an occasional commit keeps your fork alive.
+### Create Your Own Filter Lists
+1. **Fork** this repository.
+2. **Enable** GitHub Actions in your fork.
+3. **Add** a `.txt` file in the `lists/` directory (e.g., `my-list.txt`).
+4. **Populate** the file with one filter list URL per line.
+5. **Commit and push** your changes.
+6. **Grab** your custom link from the `releases/latest/download/...` path.
 
-# ⚡ Bandwidth Hero Server
+**Pro Tips:**
+- Keep generated files under **20 MB**.
+- If the file is too large, trim your sources and rebuild.
+- GitHub disables scheduled workflows after 60 days of inactivity; make an occasional commit to keep your fork active.
 
-> A lightweight image proxy that cuts bandwidth and speeds up browsing.
+---
 
-Bandwidth Hero Server fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use.
+## 🚀 Bandwidth Hero Server
 
-🖥️ Try [Bandwidth Hero](https://bhserv.netlify.app/).
+A lightweight image proxy designed to slash bandwidth usage and accelerate your browsing experience. 
 
-### [License](LICENSE)
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to your device for faster loading and lower data consumption.
 
-Free software. Do what you want with it.
+🖥️ **Try it out:** [Bandwidth Hero](https://bhserv.netlify.app/)
 
-## Supporting My Project
+---
 
-If you'd like to support the project, donate:
+## 📄 License & Support
 
-- Bitcoin: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
+**License:** Free software. Do whatever you want with it. See the [LICENSE](LICENSE) file for details.
+
+**Support the Project:**
+If you find this tool useful, consider donating:
+- **Bitcoin:** `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
+- 
