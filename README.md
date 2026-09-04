@@ -6,7 +6,7 @@ You can choose any list from the table, then hold the name to copy its link. Add
 
 | Link | Description  |
 | ------ | ------|
-| [Adblock Default](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) | Combined Adguard & EasyList filter list (Ads+Privacy+Annoyance+Threat Intelligence Feeds) [Sources](https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/refs/heads/main/sources.txt)|
+| [Adblock Default](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) | Combined Adguard, EasyList and HaGeZi filter list (Ads+Privacy+Annoyance+Threat Intelligence Feeds) [Sources](https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/refs/heads/main/sources.txt)|
 
 Alternatively, you can [go here to search forks of this project](https://filterlists.010.one/) for more lists, e.g. for other countries.
 
