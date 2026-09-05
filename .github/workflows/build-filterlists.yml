@@ -2,58 +2,121 @@ name: Build filterlists
 
 on:
   push:
-    branches: [ main ]
-
+    branches:
+      - main
   schedule:
-  - cron: "0 15 * * *"
-
+    # Daily at 15:00 UTC
+    - cron: "0 15 * * *"
   workflow_dispatch:
+
+concurrency:
+  group: build-filterlists
+  cancel-in-progress: false
 
 permissions:
   contents: write
 
+env:
+  TZ: UTC
+
 jobs:
   build:
-    name: Build
+    name: Build and publish filterlists
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-    - name: Set up Go
-      uses: actions/setup-go@v5
-      with:
-        go-version: ^1.15
-    
-    - name: Download repo
-      uses: actions/checkout@v4
+      - name: Check out repository
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
 
-    - name: Running build/generation script
-      shell: bash
-      run: |
-        bash ./generate.sh 2>&1
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: true
 
-    - name: Generate tag name
-      run: echo "TAG_NAME=$(date +%F-%H-%M)" >> $GITHUB_ENV
+      - name: Generate filterlists
+        shell: bash
+        run: |
+          set -Eeuo pipefail
 
-    - name: Release filter lists
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/*.dat
-        name: Automatic list generation
-        tag_name: ${{ env.TAG_NAME }}
-        body_path: release.md
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          test -f ./generate.sh
+          chmod +x ./generate.sh
 
-    - name: Delete older releases
-      uses: dev-drprasad/delete-older-releases@v0.3.3
-      with:
-        keep_latest: 2
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ./generate.sh
 
-    - name: Upload log files
-      uses: actions/upload-artifact@v4
-      with:
-        name: Logs
-        path: logs/*.log
-      if: ${{ always() }}
+      - name: Validate generated files
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          test -d dist
+          test -n "$(find dist -maxdepth 1 -type f -name '*.dat' -print -quit)"
+
+          if [[ ! -f release.md ]]; then
+            echo "release.md not found"
+            exit 1
+          fi
+
+      - name: Generate release tag
+        id: release
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+
+          tag_name="$(date -u +'%Y-%m-%d-%H-%M-%S')"
+          echo "tag_name=${tag_name}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish filterlists release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag_name }}
+          name: Automatic list generation
+          body_path: release.md
+          files: dist/*.dat
+          fail_on_unmatched_files: true
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete older generated releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -Eeuo pipefail
+
+          gh release list \
+            --limit 100 \
+            --json tagName,createdAt \
+            --jq '
+              map(
+                select(
+                  .tagName
+                  | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}-[0-9]{2}$")
+                )
+              )
+              | sort_by(.createdAt)
+              | reverse
+              | .[2:]
+              | .[].tagName
+            ' |
+          while IFS= read -r tag_name; do
+            [[ -z "$tag_name" ]] && continue
+
+            echo "Deleting old release: $tag_name"
+            gh release delete "$tag_name" \
+              --cleanup-tag \
+              --yes
+          done
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: logs/*.log
+          if-no-files-found: warn
+          retention-days: 7
