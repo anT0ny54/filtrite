@@ -8,7 +8,7 @@ Pick a list below, then **tap and hold** to copy the link. In Bromite/Cromite, n
 
 | List | Description | Link |
 | :--- | :--- | :--- |
-| **Adblock Default** | AdGuard + EasyList + HaGeZi (Ads, Privacy, Annoyance, Threat Intelligence) | [Download `.dat`](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) |
+| **Adblock Default** | AdGuard + EasyList (Ads, Privacy, Annoyance) | [Download `.dat`](https://github.com/anT0ny54/filtrite/releases/latest/download/adblock.dat) |
 
 👉 [Browse forks for more lists](https://filterlists.010.one/) | [View Sources](https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/refs/heads/main/sources.txt)
 
