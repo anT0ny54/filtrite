@@ -14,9 +14,6 @@ Pick a list below, then **tap and hold** to copy the link. In Bromite/Cromite, n
 
 *Lists are updated automatically via GitHub Actions.*
 
-> [!NOTE]
-> Some formats may still encounter errors in the generator. If you spot one, please [open an issue](https://github.com/anT0ny54/filtrite/issues).
-
 ---
 
 ## 🌐 My Free DNS Server
