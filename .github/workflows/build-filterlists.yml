@@ -89,7 +89,7 @@ jobs:
           set -Eeuo pipefail
 
           gh release list \
-            --limit 2 \
+            --limit 100 \
             --json tagName,createdAt \
             --jq '
               map(
