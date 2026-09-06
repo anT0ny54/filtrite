@@ -25,10 +25,10 @@ var (
 )
 
 type releaseInfo struct {
-	ListName  string
-	Repo      string
-	GotCount  int
-	FullCount int
+	ListName   string
+	Repo       string
+	GotCount   int
+	FullCount  int
 	ErrorCount int
 }
 

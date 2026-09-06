@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	maxListLineBytes  = 2 * 1024 * 1024 // 2 MiB
+	maxListLineBytes   = 2 * 1024 * 1024 // 2 MiB
 	initialURLCapacity = 256
 )
 
