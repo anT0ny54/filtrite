@@ -5,8 +5,7 @@ on:
     branches:
       - main
   schedule:
-    # Daily at 15:00 UTC
-    - cron: "0 15 * * *"
+    - cron: "00 4 * * *"
   workflow_dispatch:
 
 concurrency:
