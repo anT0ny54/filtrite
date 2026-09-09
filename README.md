@@ -22,6 +22,7 @@ Experience high-performance filtering with HaGeZi Blocklists (Multi Pro + TIF) v
 
 | Configuration | DNS-over-HTTPS (DoH) Endpoint |
 | :--- | :--- |
+| **Multi Pro + TIF** | `https://freedns.koyeb.app/dns-query` (Recommended) |
 | **Multi Pro + TIF** | `https://freedns-six.vercel.app/api/doh/dns-query` (Recommended) |
 | **Multi Pro + TIF** | `https://dnssix.netlify.app/api/doh/dns-query` |
 
