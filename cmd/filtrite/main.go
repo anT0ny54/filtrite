@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"legacy-bromite-optimized/internal/ruleset"
+	"filtrite/internal/ruleset"
 )
 
 func main() {
