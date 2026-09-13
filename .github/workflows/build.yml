@@ -1,0 +1,57 @@
+name: Build legacy Bromite/Cromite adblock
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sources.txt"
+      - "custom-rules.txt"
+      - "cmd/**"
+      - "internal/**"
+      - "build.sh"
+      - "scripts/**"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/build.yml"
+  schedule:
+    - cron: "30 3 * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: legacy-bromite-adblock
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.23"
+          cache: true
+      - name: Build and validate
+        run: |
+          chmod +x build.sh scripts/validate.sh
+          ./build.sh
+          ./scripts/validate.sh filters.txt
+      - name: Publish release artifact
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: legacy-${{ github.run_number }}
+          target_commitish: ${{ github.sha }}
+          name: Legacy Bromite/Cromite adblock ${{ github.run_number }}
+          body: |
+            Generated from filters.txt using Chromium's ruleset_converter.
+            Legacy target: unindexed-ruleset.
+          files: |
+            dist/adblock.dat
+            filters.txt
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
