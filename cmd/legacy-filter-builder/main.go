@@ -11,8 +11,8 @@ import (
 	"path/filepath"
 	"time"
 
-	"legacy-bromite-optimized/internal/download"
-	"legacy-bromite-optimized/internal/filter"
+	"filtrite/internal/download"
+	"filtrite/internal/filter"
 )
 
 func main() {
