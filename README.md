@@ -16,6 +16,24 @@ Pick a list below, then **tap and hold** to copy the link. In Bromite/Cromite, n
 
 ---
 
+## 🧩 Filter Syntax Support
+
+`filters.txt` targets the **legacy** Bromite/Cromite ad-blocking path — Chromium's [`subresource_filter`](https://github.com/chromium/chromium/tree/master/components/subresource_filter), converted with `ruleset_converter --input_format=filter-list`. That engine understands a smaller rule set than uBlock Origin/AdGuard/modern Adblock Plus, so every source rule is validated and either kept as-is or rejected outright — never silently reinterpreted into something the converter might mis-parse.
+
+**Kept:**
+- `||host^` / `||host/path...` network rules and their `@@` exceptions
+- `|http://...` / `|https://...` fully-anchored rules
+- Hosts-file entries (`0.0.0.0 host`, `127.0.0.1 host`, `::1 host`)
+- The `$` options the real engine's filter-list parser accepts without flagging them deprecated/unsupported/whitelist-only: `third-party` / `~third-party`, `match-case`, and `domain=a.com|~b.com`
+
+**Rejected:** cosmetic filters (`##`, `#@#`, ...), scriptlets/procedural selectors (`+js(...)`, `:has-text(...)`, ...), regex rules (`/.../`) , and any other `$` option (`$script`, `$image`, `$document`, `$sitekey`, `$collapse`, ...) — these either have no effect in this engine or aren't parsed by it at all.
+
+Every unconditional `||host^` block is additionally suffixed with `$third-party` in the final output. This mirrors [Chromium's own documented fix](https://github.com/chromium/chromium/blob/master/components/subresource_filter/FILTER_LIST_GENERATION.md) (`crbug.com/448915986`) for generating filter lists for this engine: without it, a bare host block also matches the main-frame navigation when that host is visited directly as a first-party page, which can make the page look broken instead of just blocking it as a third-party embed elsewhere.
+
+Rejected lines aren't just dropped silently — each build writes a `rejected-*.txt` report (source, line number, reason, original line) alongside the generated `filters.txt`.
+
+---
+
 ## 🌐 My Free DNS Server
 
 Experience high-performance filtering with HaGeZi Blocklists (Multi Pro + TIF) via **My Free DNS**.
