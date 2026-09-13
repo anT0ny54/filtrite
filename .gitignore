@@ -1,7 +1,4 @@
-filtrite
-tmp/
-.vscode
+build/
 deps/
-logs/
 dist/
-release.md
+*.tmp*

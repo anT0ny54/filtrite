@@ -1,3 +1,3 @@
-module ant0ny54/filtrite
+module legacy-bromite-optimized
 
-go 1.24
+go 1.23
