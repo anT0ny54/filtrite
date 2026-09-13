@@ -1,6 +1,0 @@
-filters.txt
-rules=203507
-bytes=5196137
-sha256=724134e364841445ea55ee62164f003f33b7a827d5edd3ca922c8b004643f603
-converter_tag=2026-07-24-05-28
-chromium_commit=fe31658833
