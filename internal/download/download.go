@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -114,12 +115,20 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 	if workers > len(urls) {
 		workers = len(urls)
 	}
+	// budget is a shared cap on the combined size of every successful
+	// download, enforced across all concurrent workers. It starts at
+	// MaxTotalBytes and is atomically decremented as bytes are read;
+	// once it goes negative, further reads are rejected as too large.
+	// This backs the MaxTotalBytes constant with real enforcement instead
+	// of leaving it a declared-but-unchecked limit.
+	budget := new(int64)
+	*budget = MaxTotalBytes
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
 			for u := range jobs {
-				p, n, err := get(ctx, c, u, dir, retries)
+				p, n, err := get(ctx, c, u, dir, retries, budget)
 				mu.Lock()
 				results = append(results, Result{URL: u, Path: p, Bytes: n, Err: err})
 				mu.Unlock()
@@ -149,7 +158,7 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 	return results, nil
 }
 
-func get(ctx context.Context, c *client, rawURL, dir string, retries int) (string, int64, error) {
+func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
 	var last error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
@@ -159,7 +168,7 @@ func get(ctx context.Context, c *client, rawURL, dir string, retries int) (strin
 				return "", 0, ctx.Err()
 			}
 		}
-		p, n, e := getOnce(ctx, c, rawURL, dir)
+		p, n, e := getOnce(ctx, c, rawURL, dir, budget)
 		if e == nil {
 			return p, n, nil
 		}
@@ -171,7 +180,7 @@ func get(ctx context.Context, c *client, rawURL, dir string, retries int) (strin
 	return "", 0, fmt.Errorf("after %d attempts: %w", retries+1, last)
 }
 
-func getOnce(ctx context.Context, c *client, rawURL, dir string) (string, int64, error) {
+func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", 0, err
@@ -211,12 +220,13 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string) (string, int64,
 		cleanup()
 		return "", 0, fmt.Errorf("empty response")
 	}
+	if atomic.AddInt64(budget, -n) < 0 {
+		cleanup()
+		return "", n, fmt.Errorf("%w: exceeded combined download budget of %d bytes across all sources", ErrTooLarge, MaxTotalBytes)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return "", n, err
-	}
-	if strings.EqualFold(resp.Header.Get("Content-Type"), "text/html") { // do not reject only on header; inspect body prefix below would require reread
-		// HTML is filtered by prefix sniff in inspectDownloaded.
 	}
 	if err := os.Rename(tmpPath, final); err != nil {
 		return "", n, err
@@ -255,9 +265,3 @@ func retryable(err error) bool {
 	return !errors.Is(err, ErrTooLarge)
 }
 func shaName(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
