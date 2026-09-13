@@ -1,2 +1,0 @@
-# My Adblocklist
-https://raw.githubusercontent.com/anT0ny54/Legacy-bromite-adblocklist/main/filters.txt
