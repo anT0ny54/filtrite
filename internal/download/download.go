@@ -1,6 +1,7 @@
 package download
 
 import (
+	"bufio"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -56,33 +57,51 @@ func newClient(timeout time.Duration) *client {
 }
 
 func URLsFromFile(path string) ([]string, error) {
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("open source list: %w", err)
 	}
-	seen := map[string]struct{}{}
-	out := []string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(line, "\r"), "\uFEFF"))
-		if line == "" || strings.HasPrefix(line, "#") {
+	defer f.Close()
+
+	seen := make(map[string]struct{})
+	urls := make([]string, 0, 32)
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 16<<10), 1<<20)
+	for lineNo := 1; sc.Scan(); lineNo++ {
+		rawLine := strings.TrimPrefix(strings.TrimSuffix(sc.Text(), "\r"), "\uFEFF")
+		trimmed := strings.TrimSpace(rawLine)
+		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
 		}
-		u, err := url.ParseRequestURI(line)
-		if err != nil || u.Hostname() == "" || !strings.EqualFold(u.Scheme, "https") {
+		if rawLine != trimmed {
+			return nil, fmt.Errorf("source list line %d: leading/trailing whitespace is not allowed", lineNo)
+		}
+
+		u, err := url.ParseRequestURI(rawLine)
+		if err != nil || u.Hostname() == "" || !strings.EqualFold(u.Scheme, "https") || u.User != nil {
+			if err == nil {
+				err = fmt.Errorf("must be an HTTPS URL without embedded credentials")
+			}
+			return nil, fmt.Errorf("source list line %d: %q: %w", lineNo, rawLine, err)
+		}
+		u.Scheme = "https"
+		canonical := u.String()
+		if _, exists := seen[canonical]; exists {
 			continue
 		}
-		u.Scheme = strings.ToLower(u.Scheme)
-		s := u.String()
-		if _, ok := seen[s]; ok {
-			continue
-		}
-		seen[s] = struct{}{}
-		out = append(out, s)
-		if len(out) > MaxSources {
+		seen[canonical] = struct{}{}
+		urls = append(urls, canonical)
+		if len(urls) > MaxSources {
 			return nil, fmt.Errorf("more than %d sources", MaxSources)
 		}
 	}
-	return out, nil
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("read source list: %w", err)
+	}
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("no HTTPS sources configured")
+	}
+	return urls, nil
 }
 
 func All(ctx context.Context, urls []string, dir string, workers, retries int, timeout time.Duration) ([]Result, error) {
@@ -98,58 +117,56 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return nil, err
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create download directory: %w", err)
 	}
-	c := newClient(timeout)
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no URLs")
 	}
 	if len(urls) > MaxSources {
 		return nil, fmt.Errorf("too many sources")
 	}
-	jobs := make(chan string)
-	results := make([]Result, 0, len(urls))
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 	if workers > len(urls) {
 		workers = len(urls)
 	}
-	// budget is a shared cap on the combined size of every successful
-	// download, enforced across all concurrent workers. It starts at
-	// MaxTotalBytes and is atomically decremented as bytes are read;
-	// once it goes negative, further reads are rejected as too large.
-	// This backs the MaxTotalBytes constant with real enforcement instead
-	// of leaving it a declared-but-unchecked limit.
-	budget := new(int64)
-	*budget = MaxTotalBytes
+
+	c := newClient(timeout)
+	type job struct {
+		index int
+		url   string
+	}
+	jobs := make(chan job)
+	results := make([]Result, len(urls))
+	budget := MaxTotalBytes
+
+	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
-			for u := range jobs {
-				p, n, err := get(ctx, c, u, dir, retries, budget)
-				mu.Lock()
-				results = append(results, Result{URL: u, Path: p, Bytes: n, Err: err})
-				mu.Unlock()
+			for j := range jobs {
+				path, n, err := get(ctx, c, j.url, dir, retries, &budget)
+				results[j.index] = Result{URL: j.url, Path: path, Bytes: n, Err: err}
 			}
 		}()
 	}
-	for _, u := range urls {
+
+	for i, rawURL := range urls {
 		select {
-		case jobs <- u:
+		case jobs <- job{index: i, url: rawURL}:
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
-			return results, ctx.Err()
+			return results[:i], ctx.Err()
 		}
 	}
 	close(jobs)
 	wg.Wait()
+
 	var errs []error
-	for _, r := range results {
-		if r.Err != nil {
-			errs = append(errs, fmt.Errorf("%s: %w", r.URL, r.Err))
+	for _, result := range results {
+		if result.Err != nil {
+			errs = append(errs, fmt.Errorf("%s: %w", result.URL, result.Err))
 		}
 	}
 	if len(errs) > 0 {
@@ -186,7 +203,7 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 		return "", 0, err
 	}
 	req.Header.Set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
-	req.Header.Set("User-Agent", "legacy-bromite-filter-builder/3.0")
+	req.Header.Set("User-Agent", "filtrite/4.0 (legacy-subresource-filter-builder)")
 	resp, err := c.http.Do(req)
 	if err != nil {
 		return "", 0, err
@@ -207,7 +224,8 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 	tmpPath := tmp.Name()
 	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
 	defer func() { os.Remove(tmpPath) }()
-	n, err := io.Copy(tmp, io.LimitReader(resp.Body, MaxSourceBytes+1))
+	reader := &budgetReader{r: io.LimitReader(resp.Body, MaxSourceBytes+1), remaining: budget}
+	n, err := io.Copy(tmp, reader)
 	if err != nil {
 		cleanup()
 		return "", 0, err
@@ -219,10 +237,6 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 	if n == 0 {
 		cleanup()
 		return "", 0, fmt.Errorf("empty response")
-	}
-	if atomic.AddInt64(budget, -n) < 0 {
-		cleanup()
-		return "", n, fmt.Errorf("%w: exceeded combined download budget of %d bytes across all sources", ErrTooLarge, MaxTotalBytes)
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
@@ -237,6 +251,39 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 	}
 	return final, n, nil
 }
+
+type budgetReader struct {
+	r         io.Reader
+	remaining *int64
+}
+
+func (r *budgetReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	for {
+		remaining := atomic.LoadInt64(r.remaining)
+		if remaining <= 0 {
+			return 0, ErrTooLarge
+		}
+
+		want := int64(len(p))
+		if want > remaining {
+			want = remaining
+		}
+		if !atomic.CompareAndSwapInt64(r.remaining, remaining, remaining-want) {
+			continue
+		}
+
+		n, err := r.r.Read(p[:want])
+		if unused := want - int64(n); unused > 0 {
+			atomic.AddInt64(r.remaining, unused)
+		}
+		return n, err
+	}
+}
+
 func htmlError(path string) bool {
 	f, err := os.Open(path)
 	if err != nil {
@@ -245,8 +292,8 @@ func htmlError(path string) bool {
 	defer f.Close()
 	buf := make([]byte, 4096)
 	n, _ := f.Read(buf)
-	s := strings.ToLower(string(buf[:n]))
-	return strings.Contains(s, "<html") || strings.Contains(s, "<!doctype html") || strings.Contains(s, "<head") || strings.Contains(s, "<body")
+	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(string(buf[:n])), "\ufeff"), "\xef\xbb\xbf"))
+	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body")
 }
 
 type statusError struct {
@@ -258,6 +305,9 @@ func (e *statusError) Error() string {
 	return "unexpected HTTP status: " + strconv.Itoa(e.Code) + " " + e.Status
 }
 func retryable(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
 	var s *statusError
 	if errors.As(err, &s) {
 		return s.Code == 408 || s.Code == 429 || s.Code == 500 || s.Code == 502 || s.Code == 503 || s.Code == 504
