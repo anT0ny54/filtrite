@@ -16,9 +16,9 @@ import (
 )
 
 func main() {
-	sources := flag.String("sources", "sources.txt", "HTTPS source list")
-	custom := flag.String("custom", "custom-rules.txt", "optional local custom rules")
-	output := flag.String("output", "filters.txt", "generated filter-list")
+	sources := flag.String("sources", "lists/adblock.txt", "HTTPS source list")
+	custom := flag.String("custom", "custom-rules.txt", "optional local custom rules; empty disables")
+	output := flag.String("output", "filters.txt", "generated legacy-compatible filter-list")
 	buildDir := flag.String("build-dir", "build", "build/report directory")
 	flag.Parse()
 	if err := run(*sources, *custom, *output, *buildDir); err != nil {
@@ -42,17 +42,17 @@ func run(sources, custom, outFile, buildDir string) error {
 	defer cancel()
 	results, downloadErr := download.All(ctx, urls, raw, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
 	successful := 0
-	for _, r := range results {
-		if r.Err == nil {
+	for _, result := range results {
+		if result.Err == nil {
 			successful++
 		}
 	}
 	fmt.Printf("Sources: %d configured, %d downloaded\n", len(urls), successful)
 	if downloadErr != nil {
-		fmt.Printf("WARNING: %v\n", downloadErr)
+		return fmt.Errorf("source download failed: %w", downloadErr)
 	}
 
-	b := filter.Builder{KeepURLRules: true}
+	b := filter.Builder{}
 	var allRules []string
 	var totalRead, totalRejected int
 	for _, r := range results {
@@ -70,7 +70,14 @@ func run(sources, custom, outFile, buildDir string) error {
 		totalRejected += st.Rejected
 	}
 	if custom != "" {
-		if info, err := os.Stat(custom); err == nil && info.Size() > 0 {
+		info, err := os.Stat(custom)
+		if err != nil {
+			return fmt.Errorf("custom rules %q: %w", custom, err)
+		}
+		if info.IsDir() {
+			return fmt.Errorf("custom rules %q is a directory", custom)
+		}
+		if info.Size() > 0 {
 			rules, st, err := b.ReadFile(custom, filepath.Join(buildDir, "rejected-custom.txt"))
 			if err != nil {
 				return err
@@ -87,7 +94,7 @@ func run(sources, custom, outFile, buildDir string) error {
 	if err := filter.Write(outFile, final); err != nil {
 		return err
 	}
-	fmt.Printf("Read rules: %d; rejected: %d; exact+semantic redundant removed: %d; output rules: %d\n", totalRead, totalRejected, red, len(final))
+	fmt.Printf("Read rules: %d; rejected: %d; duplicate rules removed: %d; output rules: %d\n", totalRead, totalRejected, red, len(final))
 	return nil
 }
 func shortHash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:6]) }
