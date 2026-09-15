@@ -21,7 +21,7 @@ fi
 go build -trimpath -ldflags='-s -w' -o build/legacy-filter-builder ./cmd/legacy-filter-builder
 go build -trimpath -ldflags='-s -w' -o build/filtrite ./cmd/filtrite
 
-./build/legacy-filter-builder --sources sources.txt --custom custom-rules.txt --output filters.txt --build-dir build
+./build/legacy-filter-builder --sources lists/adblock.txt --custom custom-rules.txt --output filters.txt --build-dir build
 ./build/filtrite --input filters.txt --output dist/adblock.dat --converter deps/ruleset_converter
 
 test -s filters.txt
