@@ -12,11 +12,8 @@ BEGIN{bad=0}
   if($0~/\+js\(|:has-text\(|:contains\(|:matches-css\(|:xpath\(|:style\(/){print "scriptlet/procedural: " NR;bad=1}
   if($0~/^\/.*\/$/){print "regex: " NR;bad=1}
 
-  # Only the $-modifiers filter.go itself can emit are accepted here:
-  # third-party (and its negation), match-case, and domain=<value>. Any
-  # other keyword ($script, $document, $sitekey, ...) is rejected, mirroring
-  # parseModifiers() in internal/filter/filter.go so this secondary check
-  # never drifts out of sync with what the Go builder actually produces.
+  # Secondary sanity check for the modifier subset emitted by filter.go.
+  # Chromium ruleset_converter remains the authoritative final parser.
   line=$0
   dollar=0
   for(i=length(line);i>=1;i--){ if(substr(line,i,1)=="$"){dollar=i;break} }
@@ -35,7 +32,7 @@ BEGIN{bad=0}
     }
   }
 
-  if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else if(line~/^\|https?:\/\//){next} else {print "unsupported prefix: " NR;bad=1;next}
+  if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else if(line~/^@@\|https?:\/\// || line~/^\|https?:\/\//){next} else {print "unsupported prefix: " NR;bad=1;next}
   host=x;sub(/[\/?#\^|].*$/,"",host)
   if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}
 }
