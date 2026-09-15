@@ -29,8 +29,12 @@ func Convert(ctx context.Context, o Options) error {
 	if strings.TrimSpace(o.Output) == "" {
 		return fmt.Errorf("output is empty")
 	}
-	if _, err := os.Stat(o.Input); err != nil {
+	inputInfo, err := os.Stat(o.Input)
+	if err != nil {
 		return fmt.Errorf("input: %w", err)
+	}
+	if !inputInfo.Mode().IsRegular() {
+		return fmt.Errorf("input is not a regular file: %s", o.Input)
 	}
 	outDir := filepath.Dir(o.Output)
 	if outDir == "" {
@@ -44,8 +48,10 @@ func Convert(ctx context.Context, o Options) error {
 		return err
 	}
 	tmpPath := tmp.Name()
-	tmp.Close()
-	os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("close temporary output: %w", err)
+	}
 	defer os.Remove(tmpPath)
 	args := []string{"--input_format=filter-list", "--output_format=unindexed-ruleset", "--input_files=" + o.Input, "--output_file=" + tmpPath}
 	cmd := exec.CommandContext(ctx, o.Converter, args...)
@@ -55,10 +61,12 @@ func Convert(ctx context.Context, o Options) error {
 		if logDir == "" {
 			logDir = "."
 		}
-		os.MkdirAll(logDir, 0755)
+		if err := os.MkdirAll(logDir, 0o755); err != nil {
+			return fmt.Errorf("create log directory: %w", err)
+		}
 		logf, err = os.Create(o.Log)
 		if err != nil {
-			return err
+			return fmt.Errorf("create converter log: %w", err)
 		}
 		cmd.Stdout = logf
 		cmd.Stderr = logf
@@ -85,7 +93,7 @@ func Convert(ctx context.Context, o Options) error {
 		return fmt.Errorf("converter created empty output")
 	}
 	if err := os.Rename(tmpPath, o.Output); err != nil {
-		return err
+		return fmt.Errorf("replace output %s: %w", o.Output, err)
 	}
 	return nil
 }
