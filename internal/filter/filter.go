@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -15,36 +16,49 @@ type Stats struct {
 	ByReason map[string]int
 }
 
-type Builder struct{ KeepURLRules bool }
+type Builder struct{}
 
-func (b Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
+func (Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
 	in, err := os.Open(input)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("open %s: %w", input, err)
 	}
 	defer in.Close()
+
+	if err := os.MkdirAll(filepath.Dir(rejectedPath), 0o755); err != nil {
+		return nil, Stats{}, fmt.Errorf("create rejected report directory: %w", err)
+	}
 	rej, err := os.Create(rejectedPath)
 	if err != nil {
 		return nil, Stats{}, fmt.Errorf("create rejected report: %w", err)
 	}
 	defer rej.Close()
-	fmt.Fprintln(rej, "# line\treason\trule")
-	var rules []string
-	st := Stats{ByReason: map[string]int{}}
-	seen := map[string]struct{}{}
+
+	if _, err := fmt.Fprintln(rej, "# line\treason\trule"); err != nil {
+		return nil, Stats{}, fmt.Errorf("write rejected report header: %w", err)
+	}
+
+	rules := make([]string, 0, 4096)
+	stats := Stats{ByReason: make(map[string]int)}
+	seen := make(map[string]struct{}, 4096)
+
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 2<<20)
 	for sc.Scan() {
-		st.Read++
-		line := strings.TrimSpace(strings.TrimPrefix(strings.TrimSuffix(sc.Text(), "\r"), "\uFEFF"))
-		if line == "" || strings.HasPrefix(line, "!") {
+		stats.Read++
+		rawLine := strings.TrimPrefix(strings.TrimSuffix(sc.Text(), "\r"), "\uFEFF")
+		trimmed := strings.TrimSpace(rawLine)
+		if trimmed == "" || strings.HasPrefix(trimmed, "!") {
 			continue
 		}
-		rule, reason, ok := b.normalize(line)
+
+		rule, reason, ok := (Builder{}).normalize(rawLine)
 		if !ok {
-			st.Rejected++
-			st.ByReason[reason]++
-			fmt.Fprintf(rej, "%d\t%s\t%s\n", st.Read, reason, sanitizeReport(line))
+			stats.Rejected++
+			stats.ByReason[reason]++
+			if _, err := fmt.Fprintf(rej, "%d\t%s\t%s\n", stats.Read, reason, sanitizeReport(rawLine)); err != nil {
+				return nil, stats, fmt.Errorf("write rejected report: %w", err)
+			}
 			continue
 		}
 		if _, exists := seen[rule]; exists {
@@ -54,82 +68,54 @@ func (b Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
 		rules = append(rules, rule)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, st, fmt.Errorf("scan %s: %w", input, err)
+		return nil, stats, fmt.Errorf("scan %s: %w", input, err)
 	}
-	return rules, st, nil
+	if err := rej.Sync(); err != nil {
+		return nil, stats, fmt.Errorf("sync rejected report: %w", err)
+	}
+	return rules, stats, nil
 }
 
-// Optimize deduplicates rules, drops network rules that are strictly
-// subsumed by a broader rule already present in the set, and then guards
-// every surviving unconditional host block so it cannot also match the
-// top-level navigation to that same host. It returns the optimized rule
-// set and the number of rules dropped as redundant.
+// Optimize performs only transformations that are provably semantics-preserving
+// for the legacy Chromium subresource_filter syntax:
+//   - exact duplicate removal;
+//   - canonical ordering; and
+//   - Chromium's required third-party guard on bare ||host^ / ||host| blocks.
+//
+// It deliberately does not perform path/domain/modifier subsumption because
+// those rules can differ in first-party/third-party or initiator-domain scope.
 func Optimize(rules []string) ([]string, int) {
 	set := make(map[string]struct{}, len(rules))
-	for _, r := range rules {
-		if r != "" {
-			set[r] = struct{}{}
+	duplicateCount := 0
+	for _, rule := range rules {
+		if rule == "" {
+			continue
 		}
-	}
-
-	// A "domain block" is an unconditional ||host^ or ||host| rule: it has
-	// no path/query/fragment restriction and no $-modifier, so it already
-	// matches every request made to that host.
-	domainBlocks := make(map[string]bool)
-	for r := range set {
-		if strings.HasPrefix(r, "||") {
-			h, suffix, ok := splitAnchored(r[2:])
-			if ok && (suffix == "^" || suffix == "|") {
-				domainBlocks[h] = true
-			}
+		if _, exists := set[rule]; exists {
+			duplicateCount++
+			continue
 		}
+		set[rule] = struct{}{}
 	}
 
 	out := make([]string, 0, len(set))
-	redundant := 0
-	for r := range set {
-		if strings.HasPrefix(r, "||") {
-			h, suffix, ok := splitAnchored(r[2:])
-			// Any narrower rule for a host that is already unconditionally
-			// blocked is redundant, whether the narrowing comes from a
-			// path/query/fragment or from a $-modifier such as
-			// $third-party/$domain=...: the bare host block already
-			// matches every one of those more specific requests too.
-			if ok && domainBlocks[h] && suffix != "^" && suffix != "|" && suffix != "" && strings.ContainsAny(suffix, "/?#$") {
-				redundant++
-				continue
+	for rule := range set {
+		if strings.HasPrefix(rule, "||") {
+			if _, suffix, ok := splitAnchored(rule[2:]); ok && (suffix == "^" || suffix == "|") {
+				rule += "$third-party"
 			}
 		}
-		out = append(out, r)
-	}
-
-	// Guard every surviving unconditional block with $third-party. Without
-	// it, the legacy Chromium subresource_filter engine this project
-	// targets also matches the main-frame request when the blocked host is
-	// visited directly as a first-party page, which can make the page
-	// appear broken instead of merely blocking it as a third-party embed
-	// elsewhere. This mirrors the exact fix Chromium documents for
-	// generating a filter list for this engine (see
-	// components/subresource_filter/FILTER_LIST_GENERATION.md, which
-	// references crbug.com/448915986). Exception (@@) rules are left
-	// untouched, since an allow rule has no equivalent failure mode.
-	for i, r := range out {
-		if strings.HasPrefix(r, "@@") || !strings.HasPrefix(r, "||") {
-			continue
-		}
-		if _, suffix, ok := splitAnchored(r[2:]); ok && (suffix == "^" || suffix == "|") {
-			out[i] = r + "$third-party"
-		}
+		out = append(out, rule)
 	}
 
 	sort.Strings(out)
-	return out, redundant
+	return out, duplicateCount
 }
 
 func Write(path string, rules []string) error {
-	dir := filepathDir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		return err
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("create output directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(dir, ".filters.tmp-*")
 	if err != nil {
@@ -137,39 +123,44 @@ func Write(path string, rules []string) error {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
+
 	w := bufio.NewWriterSize(tmp, 1<<20)
-	for _, r := range rules {
-		if _, err := fmt.Fprintln(w, r); err != nil {
-			tmp.Close()
+	for _, rule := range rules {
+		if _, err := fmt.Fprintln(w, rule); err != nil {
+			_ = tmp.Close()
 			return err
 		}
 	}
 	if err := w.Flush(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return err
 	}
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpPath, path)
+	if err := os.Rename(tmpPath, path); err != nil {
+		return fmt.Errorf("replace %s: %w", path, err)
+	}
+	return nil
 }
 
-func (b Builder) normalize(line string) (string, string, bool) {
-	// Hosts-file records legitimately contain a separating space; parse them
-	// before enforcing the no-whitespace rule used by filter syntax.
+func (Builder) normalize(line string) (string, string, bool) {
+	// Hosts-file records legitimately contain a separator; only accept the
+	// canonical address + exactly one hostname so extra fields are not ignored.
 	for _, prefix := range []string{"0.0.0.0 ", "127.0.0.1 ", "::1 "} {
 		if strings.HasPrefix(line, prefix) {
-			f := strings.Fields(line)
-			if len(f) >= 2 && validDomain(f[1]) {
-				return "||" + strings.ToLower(f[1]) + "^", "", true
+			fields := strings.Fields(line)
+			if len(fields) == 2 && validDomain(fields[1]) {
+				return "||" + strings.ToLower(fields[1]) + "^", "", true
 			}
 			return "", "invalid-host-entry", false
 		}
 	}
+
 	if !utf8.ValidString(line) {
 		return "", "invalid-utf8", false
 	}
@@ -178,23 +169,32 @@ func (b Builder) normalize(line string) (string, string, bool) {
 			return "", "non-ascii-or-whitespace", false
 		}
 	}
-	for _, m := range []string{"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#", "+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style("} {
-		if strings.Contains(line, m) {
+
+	for _, marker := range []string{
+		"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
+		"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
+	} {
+		if strings.Contains(line, marker) {
 			return "", "unsupported-cosmetic-scriptlet", false
 		}
 	}
 	if len(line) >= 2 && line[0] == '/' && line[len(line)-1] == '/' {
 		return "", "regex-filter", false
 	}
-	if strings.HasPrefix(line, "[Adblock") {
+	if strings.HasPrefix(strings.ToLower(line), "[adblock") {
 		return "", "metadata", false
 	}
+
 	exception := false
 	if strings.HasPrefix(line, "@@") {
 		exception = true
 		line = line[2:]
+		if line == "" {
+			return "", "unsupported-exception-rule", false
+		}
 	}
-	r, reason, ok := normalizeNetwork(line, b.KeepURLRules)
+
+	rule, reason, ok := normalizeNetwork(line)
 	if !ok {
 		if reason != "" {
 			return "", reason, false
@@ -205,25 +205,22 @@ func (b Builder) normalize(line string) (string, string, bool) {
 		return "", "unsupported-network-rule", false
 	}
 	if exception {
-		return "@@" + r, "", true
+		return "@@" + rule, "", true
 	}
-	return r, "", true
+	return rule, "", true
 }
 
-// normalizeNetwork parses a (non-cosmetic, non-regex, already
-// exception-prefix-stripped) network rule. Any $-suffix is validated by
-// parseModifiers before the URL pattern itself is parsed, and re-attached
-// to the canonicalized pattern on success.
-func normalizeNetwork(line string, keepURL bool) (string, string, bool) {
+func normalizeNetwork(line string) (string, string, bool) {
 	pattern := line
 	modSuffix := ""
-	if idx := strings.LastIndex(line, "$"); idx >= 0 {
+	if idx := strings.LastIndexByte(line, '$'); idx >= 0 {
 		suffix, ok := parseModifiers(line[idx+1:])
 		if !ok {
 			return "", "unsupported-modifier", false
 		}
 		pattern, modSuffix = line[:idx], suffix
 	}
+
 	if strings.HasPrefix(pattern, "||") {
 		x := pattern[2:]
 		pos := strings.IndexAny(x, "/?#^|")
@@ -234,7 +231,8 @@ func normalizeNetwork(line string, keepURL bool) (string, string, bool) {
 		if !validDomain(host) {
 			return "", "", false
 		}
-		if rest == "" || rest == "^" || rest == "|" || !keepURL {
+		switch rest {
+		case "", "^", "|":
 			return "||" + strings.ToLower(host) + "^" + modSuffix, "", true
 		}
 		if !validPath(rest) {
@@ -242,36 +240,30 @@ func normalizeNetwork(line string, keepURL bool) (string, string, bool) {
 		}
 		return "||" + strings.ToLower(host) + rest + modSuffix, "", true
 	}
+
 	if strings.HasPrefix(pattern, "|https://") || strings.HasPrefix(pattern, "|http://") {
 		hasEnd := strings.HasSuffix(pattern, "|")
-		s := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
-		rest := s[strings.Index(s, "://")+3:]
+		plain := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
+		rest := plain[strings.Index(plain, "://")+3:]
 		pos := strings.IndexAny(rest, "/?#")
 		host := rest
 		if pos >= 0 {
 			host = rest[:pos]
 		}
-		if !validDomain(host) || strings.ContainsAny(s, " \t<>\\") {
+		if !validDomain(host) || strings.ContainsAny(plain, " \t<>\\") {
 			return "", "", false
 		}
 		if hasEnd {
-			return "|" + s + "|" + modSuffix, "", true
+			return "|" + plain + "|" + modSuffix, "", true
 		}
-		return "|" + s + modSuffix, "", true
+		return "|" + plain + modSuffix, "", true
 	}
 	return "", "", false
 }
 
-// parseModifiers validates a network rule's $-suffix against the modifier
-// keywords that the Chromium subresource_filter's own filter-list parser
-// (components/subresource_filter/tools/rule_parser) accepts without
-// flagging them deprecated, unsupported, or whitelist-only: third-party
-// (tristate), match-case, and domain= (pipe-separated, each entry
-// optionally excluded with ~). Every other keyword -- element-type options
-// such as script/image/subdocument, activation options such as
-// document/genericblock, sitekey, collapse, donottrack, or anything
-// unrecognized -- is rejected outright, so this tool never emits a rule
-// that the real converter would refuse or silently reinterpret.
+// parseModifiers accepts only modifiers supported by the legacy Chromium
+// rule parser for the subset this project intentionally emits. Duplicate or
+// conflicting modifiers are rejected instead of being resolved implicitly.
 func parseModifiers(opts string) (string, bool) {
 	if opts == "" {
 		return "", false
@@ -279,31 +271,42 @@ func parseModifiers(opts string) (string, bool) {
 	var thirdParty string
 	var matchCase bool
 	var domains string
-	for _, tok := range strings.Split(opts, ",") {
-		if tok == "" {
+	seen := make(map[string]struct{}, 3)
+
+	for _, token := range strings.Split(opts, ",") {
+		if token == "" {
 			return "", false
 		}
-		negated := false
-		if strings.HasPrefix(tok, "~") {
-			negated = true
-			tok = tok[1:]
-		}
-		name, value, hasValue := tok, "", false
-		if i := strings.IndexByte(tok, '='); i >= 0 {
-			name, value, hasValue = tok[:i], tok[i+1:], true
-		}
-		switch name {
-		case "third-party":
-			if hasValue {
+		negated := strings.HasPrefix(token, "~")
+		nameValue := token
+		if negated {
+			nameValue = token[1:]
+			if nameValue == "" {
 				return "", false
 			}
+		}
+
+		name, value, hasValue := nameValue, "", false
+		if i := strings.IndexByte(nameValue, '='); i >= 0 {
+			name, value, hasValue = nameValue[:i], nameValue[i+1:], true
+		}
+
+		switch name {
+		case "third-party":
+			if hasValue || negated && thirdParty == "third-party" || !negated && thirdParty == "~third-party" {
+				return "", false
+			}
+			if _, exists := seen[name]; exists {
+				return "", false
+			}
+			seen[name] = struct{}{}
 			if negated {
 				thirdParty = "~third-party"
 			} else {
 				thirdParty = "third-party"
 			}
 		case "match-case":
-			if negated || hasValue {
+			if negated || hasValue || matchCase {
 				return "", false
 			}
 			matchCase = true
@@ -311,19 +314,20 @@ func parseModifiers(opts string) (string, bool) {
 			if negated || !hasValue || value == "" {
 				return "", false
 			}
-			d, ok := canonicalDomainList(value)
+			if _, exists := seen[name]; exists {
+				return "", false
+			}
+			seen[name] = struct{}{}
+			canonical, ok := canonicalDomainList(value)
 			if !ok {
 				return "", false
 			}
-			domains = d
+			domains = canonical
 		default:
 			return "", false
 		}
 	}
-	// At least one of the three is always set here: every switch case
-	// above that succeeds assigns a non-empty value to exactly one of
-	// them, and an empty/unrecognized token returns false before this
-	// point is ever reached.
+
 	var parts []string
 	if thirdParty != "" {
 		parts = append(parts, thirdParty)
@@ -334,30 +338,46 @@ func parseModifiers(opts string) (string, bool) {
 	if domains != "" {
 		parts = append(parts, "domain="+domains)
 	}
+	if len(parts) == 0 {
+		return "", false
+	}
 	return "$" + strings.Join(parts, ","), true
 }
 
-// canonicalDomainList validates a pipe-separated domain= value (each entry
-// optionally prefixed with ~ to exclude that domain) and sorts it so that
-// equivalent lists written in a different order compare equal, which lets
-// Optimize's exact-string deduplication catch more duplicates.
+// Chromium canonicalizes domain filters by decreasing domain length and then
+// lexicographically within equal-length groups. Matching that order makes
+// generated output stable and aligns with the converter's own representation.
 func canonicalDomainList(value string) (string, bool) {
 	entries := strings.Split(value, "|")
 	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		excl, d := "", e
-		if strings.HasPrefix(d, "~") {
-			excl, d = "~", d[1:]
+	seen := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		exclude := ""
+		domain := entry
+		if strings.HasPrefix(domain, "~") {
+			exclude = "~"
+			domain = domain[1:]
 		}
-		if !validDomain(d) {
+		if !validDomain(domain) {
 			return "", false
 		}
-		out = append(out, excl+strings.ToLower(d))
+		canonical := exclude + strings.ToLower(domain)
+		if _, exists := seen[canonical]; exists {
+			return "", false
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
 	}
 	if len(out) == 0 {
 		return "", false
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool {
+		a, b := strings.TrimPrefix(out[i], "~"), strings.TrimPrefix(out[j], "~")
+		if len(a) != len(b) {
+			return len(a) > len(b)
+		}
+		return out[i] < out[j]
+	})
 	return strings.Join(out, "|"), true
 }
 
@@ -369,16 +389,18 @@ func validPath(s string) bool {
 	}
 	return true
 }
+
 func validDomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 || strings.ContainsAny(s, "/?#^|") {
 		return false
 	}
-	p := strings.Split(strings.ToLower(s), ".")
-	if len(p) < 2 || s[0] == '.' || s[len(s)-1] == '.' || strings.Contains(s, "..") {
+	lower := strings.ToLower(s)
+	parts := strings.Split(lower, ".")
+	if len(parts) < 2 || lower[0] == '.' || lower[len(lower)-1] == '.' || strings.Contains(lower, "..") {
 		return false
 	}
 	allNumeric := true
-	for _, part := range p {
+	for _, part := range parts {
 		if len(part) == 0 || len(part) > 63 || part[0] == '-' || part[len(part)-1] == '-' {
 			return false
 		}
@@ -393,6 +415,7 @@ func validDomain(s string) bool {
 	}
 	return !allNumeric
 }
+
 func splitAnchored(x string) (string, string, bool) {
 	pos := strings.IndexAny(x, "/?#^|")
 	if pos < 0 {
@@ -400,12 +423,7 @@ func splitAnchored(x string) (string, string, bool) {
 	}
 	return strings.ToLower(x[:pos]), x[pos:], validDomain(x[:pos])
 }
+
 func sanitizeReport(s string) string {
 	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
-}
-func filepathDir(p string) string {
-	if i := strings.LastIndexAny(p, "/\\"); i >= 0 {
-		return p[:i]
-	}
-	return "."
 }
