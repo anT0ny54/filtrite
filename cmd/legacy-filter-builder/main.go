@@ -48,7 +48,24 @@ func run(sources, custom, outFile, buildDir string) error {
 		}
 	}
 	fmt.Printf("Sources: %d configured, %d downloaded\n", len(urls), successful)
+
+	// A single flaky third-party mirror should not abort the whole build:
+	// each source is independent, and internal/download already preserves
+	// a per-URL result specifically so the build can proceed with whatever
+	// succeeded. Only treat this as fatal if the run was cut short by
+	// cancellation/timeout (results may be incomplete) or if nothing at
+	// all was downloaded.
 	if downloadErr != nil {
+		if ctx.Err() != nil {
+			return fmt.Errorf("source download failed: %w", downloadErr)
+		}
+		for _, result := range results {
+			if result.Err != nil {
+				fmt.Fprintf(os.Stderr, "WARNING: skipping source %s: %v\n", result.URL, result.Err)
+			}
+		}
+	}
+	if successful == 0 {
 		return fmt.Errorf("source download failed: %w", downloadErr)
 	}
 
