@@ -1,12 +1,8 @@
 # Filter List Sources
-# Each line is a URL to a filter list that will be downloaded and merged.
-# Lines starting with # are comments.
 #
-# Maintainer: anT0ny54
-# Purpose: canonical sources used by the merge/download tool in this repo
-# Last-updated: 2026-08-30
-# Note: This file remains a simple URL-per-line format for tools that expect that
-#       format. If you want metadata (enabled/name/category) see `sources.yaml`.
+# One HTTPS URL per line; blank lines and lines starting with # are ignored.
+# Each URL must be plain HTTPS with no embedded credentials (see
+# internal/download.URLsFromFile for the exact validation rules).
 #
 # Basic Adblock
 https://filters.adtidy.org/extension/ublock/filters/101_optimized.txt
