@@ -141,6 +141,7 @@ These are unrelated to the projects above but are run by the same maintainer.
 | Multi Pro + TIF (Recommended) | `https://freedns.koyeb.app/dns-query` |
 | Multi Pro + TIF (Recommended) | `https://freedns-six.vercel.app/api/doh/dns-query` |
 | Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF (Recommended, but will sleep if not use in 15 minute) | `https://dns-871de.containers.snapdeploy.app/dns-query` |
 
 **Bandwidth Hero Server** — a lightweight image proxy that fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use: https://bhserv.netlify.app/
 
