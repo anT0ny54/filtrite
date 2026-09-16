@@ -91,6 +91,18 @@ func Optimize(rules []string) ([]string, int) {
 		if rule == "" {
 			continue
 		}
+		// Apply the third-party guard before deduplication. Different
+		// source lists frequently ship both a bare "||host^" and an
+		// already-"||host^$third-party" rule for the same host; guarding
+		// first means both collapse onto the same canonical string and are
+		// deduplicated, instead of surviving as distinct pre-guard strings
+		// that would otherwise both transform into an undetected duplicate
+		// output line.
+		if strings.HasPrefix(rule, "||") {
+			if _, suffix, ok := splitAnchored(rule[2:]); ok && (suffix == "^" || suffix == "|") {
+				rule += "$third-party"
+			}
+		}
 		if _, exists := set[rule]; exists {
 			duplicateCount++
 			continue
@@ -100,11 +112,6 @@ func Optimize(rules []string) ([]string, int) {
 
 	out := make([]string, 0, len(set))
 	for rule := range set {
-		if strings.HasPrefix(rule, "||") {
-			if _, suffix, ok := splitAnchored(rule[2:]); ok && (suffix == "^" || suffix == "|") {
-				rule += "$third-party"
-			}
-		}
 		out = append(out, rule)
 	}
 
@@ -351,6 +358,7 @@ func canonicalDomainList(value string) (string, bool) {
 	entries := strings.Split(value, "|")
 	out := make([]string, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
+	excludedBase := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		exclude := ""
 		domain := entry
@@ -361,10 +369,19 @@ func canonicalDomainList(value string) (string, bool) {
 		if !validDomain(domain) {
 			return "", false
 		}
-		canonical := exclude + strings.ToLower(domain)
+		base := strings.ToLower(domain)
+		canonical := exclude + base
 		if _, exists := seen[canonical]; exists {
 			return "", false
 		}
+		// Reject the same base domain appearing both included and
+		// excluded in one list (e.g. "foo.example|~foo.example"): that is
+		// a direct conflict, not an exact duplicate, so it is invisible to
+		// the exact-string check above.
+		if prevExcluded, exists := excludedBase[base]; exists && prevExcluded != (exclude == "~") {
+			return "", false
+		}
+		excludedBase[base] = exclude == "~"
 		seen[canonical] = struct{}{}
 		out = append(out, canonical)
 	}

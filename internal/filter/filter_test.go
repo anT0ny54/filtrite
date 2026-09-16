@@ -141,6 +141,68 @@ func TestModifierHandling(t *testing.T) {
 	}
 }
 
+func TestOptimizeDeduplicatesAfterThirdPartyGuard(t *testing.T) {
+	// Merging many source lists commonly yields both a bare "||host^" rule
+	// from one list and an already-"$third-party" tagged copy of the same
+	// rule from another. The guard must run before dedup so these collapse
+	// into a single output line instead of surviving as two distinct
+	// pre-guard strings that both transform into an undetected duplicate.
+	rules := []string{
+		"||dup.example^",
+		"||dup.example^$third-party",
+		"||other.example^",
+	}
+	final, duplicates := Optimize(rules)
+	if duplicates != 1 {
+		t.Fatalf("duplicates=%d, want 1 (final=%v)", duplicates, final)
+	}
+	if len(final) != 2 {
+		t.Fatalf("final=%v, want 2 rules", final)
+	}
+	present := map[string]bool{}
+	for _, rule := range final {
+		present[rule] = true
+	}
+	for _, want := range []string{"||dup.example^$third-party", "||other.example^$third-party"} {
+		if !present[want] {
+			t.Fatalf("missing %q in %v", want, final)
+		}
+	}
+	// The literal duplicate line must not appear twice in the output.
+	count := 0
+	for _, rule := range final {
+		if rule == "||dup.example^$third-party" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("||dup.example^$third-party appears %d times in %v, want 1", count, final)
+	}
+}
+
+func TestDomainListRejectsConflictingScope(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	input := strings.Join([]string{
+		"||conflict.example^$domain=foo.example|~foo.example",
+		"||ok.example^$domain=foo.example|~bar.example",
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 || st.ByReason["unsupported-modifier"] != 1 {
+		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
+	}
+	if rules[0] != "||ok.example^$domain=foo.example|~bar.example" {
+		t.Fatalf("unexpected surviving rule: %q", rules[0])
+	}
+}
+
 func TestOptimizeIsIdempotent(t *testing.T) {
 	rules := []string{
 		"||a.example^",
