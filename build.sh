@@ -32,4 +32,12 @@ go build -trimpath -ldflags='-s -w' -o build/filtrite ./cmd/filtrite
 
 test -s filters.txt
 test -s dist/adblock.dat
-printf 'OK: filters.txt and dist/adblock.dat generated\n'
+
+: "${MAX_RULESET_BYTES:=$((20 * 1024 * 1024))}"
+ruleset_bytes="$(wc -c < dist/adblock.dat)"
+if (( ruleset_bytes > MAX_RULESET_BYTES )); then
+  printf 'WARNING: dist/adblock.dat is %d bytes, over Bromite'\''s %d-byte filters-file limit; trim lists/adblock.txt\n' \
+    "$ruleset_bytes" "$MAX_RULESET_BYTES" >&2
+fi
+
+printf 'OK: filters.txt and dist/adblock.dat generated (%d bytes)\n' "$ruleset_bytes"

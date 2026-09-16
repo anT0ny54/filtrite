@@ -57,6 +57,8 @@ Source URLs must be valid **HTTPS URLs without embedded credentials**. Invalid e
 
 The downloader also enforces per-source and combined download-size limits, follows a small bounded number of redirects, refuses HTTPS→HTTP downgrade redirects, rejects obvious HTML error pages, and preserves source result order for deterministic reporting.
 
+A single source failing to download (a dead mirror, a transient 5xx, etc.) does not abort the build: the builder logs a warning and continues with whatever sources succeeded. The build only fails outright if the download run is cut short by cancellation/timeout or if every configured source failed.
+
 ## 🛠️ Build
 
 Requirements:
@@ -81,6 +83,8 @@ build/ruleset-converter.log
 ```
 
 The converter archive is pinned by tag in `build.sh`. For supply-chain hardening, `CONVERTER_SHA256` may be set to the expected SHA-256 of the archive; the build will then fail on mismatch.
+
+Bromite's updater rejects a filters file larger than **20 MiB** (`kMaxBodySize` in `Bromite-subresource-adblocker.patch`). `build.sh` checks `dist/adblock.dat` against this limit and prints a warning if it is exceeded; trim `lists/adblock.txt` if that happens.
 
 ## ✅ Validation
 
@@ -126,30 +130,22 @@ The GitHub Actions workflow runs tests before building and validating the genera
 See [`LICENSE`](LICENSE).
 
 
-## 🌐 Free DNS Services
+## 🔗 Other projects by the maintainer
 
-High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
+These are unrelated to the projects above but are run by the same maintainer.
 
-| Blocklist | DNS-over-HTTPS (DoH) |
-| :--- | :--- |
-| Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
-| Multi Pro + TIF | `https://freedns-six.vercel.app/api/doh/dns-query` (Recommended) |
-| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
+**My Free DNS** — DNS-over-HTTPS resolvers using HaGeZi Blocklists Multi Pro + TIF:
 
----
+| Service | DNS-over-HTTPS URL |
+| --- | --- |
+| Multi Pro + TIF (Recommended) | `https://freedns.koyeb.app/dns-query` |
+| Multi Pro + TIF (Recommended) | `https://freedns-six.vercel.app/api/doh/dns-query` |
+| Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
 
-# ⚡ Bandwidth Hero Server
+**Bandwidth Hero Server** — a lightweight image proxy that fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use: https://bhserv.netlify.app/
 
-A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
+## 💜 Support this project
 
-Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
+If you'd like to support development, consider donating:
 
-🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
-
-## Supporting the Project
-
-If you find this project useful, donations are appreciated:
-- **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
-
-  
-  
+**Bitcoin:** `1HntwKxyGCfnSGvGLMUTRAqLnTvLarAQP`
