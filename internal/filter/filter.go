@@ -52,7 +52,7 @@ func (Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
 			continue
 		}
 
-		rule, reason, ok := (Builder{}).normalize(rawLine)
+		rule, reason, ok := normalize(rawLine)
 		if !ok {
 			stats.Rejected++
 			stats.ByReason[reason]++
@@ -155,7 +155,7 @@ func Write(path string, rules []string) error {
 	return nil
 }
 
-func (Builder) normalize(line string) (string, string, bool) {
+func normalize(line string) (string, string, bool) {
 	// Hosts-file records legitimately contain a separator; only accept the
 	// canonical address + exactly one hostname so extra fields are not ignored.
 	for _, prefix := range []string{"0.0.0.0 ", "127.0.0.1 ", "::1 "} {
@@ -240,6 +240,12 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		}
 		switch rest {
 		case "", "^", "|":
+			// rest == "" is a bare "||host" with no terminator at all. Real
+			// filter-list generators always terminate a host-only rule with
+			// "^" (or "|"), so this is folded into the same "||host^" output
+			// as an explicit terminator rather than emitted as an untermin-
+			// ated pattern, which would rely on implicit substring matching
+			// past the host and is not a form any supported source emits.
 			return "||" + strings.ToLower(host) + "^" + modSuffix, "", true
 		}
 		if !validPath(rest) {
@@ -251,19 +257,29 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 	if strings.HasPrefix(pattern, "|https://") || strings.HasPrefix(pattern, "|http://") {
 		hasEnd := strings.HasSuffix(pattern, "|")
 		plain := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
-		rest := plain[strings.Index(plain, "://")+3:]
-		pos := strings.IndexAny(rest, "/?#")
-		host := rest
-		if pos >= 0 {
-			host = rest[:pos]
-		}
-		if !validDomain(host) || strings.ContainsAny(plain, " \t<>\\") {
+		if strings.ContainsAny(plain, " \t<>\\") {
 			return "", "", false
 		}
-		if hasEnd {
-			return "|" + plain + "|" + modSuffix, "", true
+		schemeEnd := strings.Index(plain, "://") + 3
+		scheme, afterScheme := plain[:schemeEnd], plain[schemeEnd:]
+		pos := strings.IndexAny(afterScheme, "/?#")
+		host, tail := afterScheme, ""
+		if pos >= 0 {
+			host, tail = afterScheme[:pos], afterScheme[pos:]
 		}
-		return "|" + plain + modSuffix, "", true
+		if !validDomain(host) {
+			return "", "", false
+		}
+		// Hostnames are case-insensitive, and GURL lower-cases the host
+		// component of every request URL before matching regardless of
+		// $match-case, so canonicalizing it here (like the "||host" branch
+		// above already does) is always safe and lets rules that only
+		// differ in host casing collapse into a single output line.
+		canonical := scheme + strings.ToLower(host) + tail
+		if hasEnd {
+			return "|" + canonical + "|" + modSuffix, "", true
+		}
+		return "|" + canonical + modSuffix, "", true
 	}
 	return "", "", false
 }

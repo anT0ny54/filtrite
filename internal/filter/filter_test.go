@@ -348,6 +348,79 @@ func TestElementTypeModifiersSurviveOptimize(t *testing.T) {
 	}
 }
 
+func TestFullyAnchoredURLRules(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	input := strings.Join([]string{
+		"|https://Example.COM/Ads.js",
+		"@@|https://Example.COM/allowed.js|",
+		"|https://Example.COM/track.js$third-party",
+		"|http://Example.ORG/x",
+		"|https://exa_mple.com/x",       // invalid host: rejected
+		"|https://example.com/<script>", // disallowed character: rejected
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]bool{}
+	for _, r := range rules {
+		present[r] = true
+	}
+	for _, want := range []string{
+		// The host is lower-cased (like the "||host" form), but the path
+		// keeps its original case: paths are case-sensitive and hosts are
+		// not, so only the host half is canonicalized.
+		"|https://example.com/Ads.js",
+		"@@|https://example.com/allowed.js|",
+		"|https://example.com/track.js$third-party",
+		"|http://example.org/x",
+	} {
+		if !present[want] {
+			t.Fatalf("missing %q in %v", want, rules)
+		}
+	}
+	if len(rules) != 4 {
+		t.Fatalf("rules=%v, want exactly 4 accepted rules", rules)
+	}
+	if got := st.Rejected; got != 2 {
+		t.Fatalf("rejected=%d, want 2; reasons=%v", got, st.ByReason)
+	}
+}
+
+func TestFullyAnchoredURLHostCasingDeduplicates(t *testing.T) {
+	// Two sources shipping the same fully-anchored rule with different host
+	// casing must normalize to the same string and collapse to one rule.
+	// ReadFile dedups on the normalized string as it reads, so this already
+	// happens before Optimize ever sees the rules; Optimize is idempotent on
+	// the result either way.
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	input := strings.Join([]string{
+		"|https://Ads.Example.com/x",
+		"|https://ads.example.com/x",
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, _, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 1 || rules[0] != "|https://ads.example.com/x" {
+		t.Fatalf("rules=%v, want exactly 1 rule %q", rules, "|https://ads.example.com/x")
+	}
+	final, duplicates := Optimize(rules)
+	if duplicates != 0 || len(final) != 1 || final[0] != "|https://ads.example.com/x" {
+		t.Fatalf("final=%v duplicates=%d", final, duplicates)
+	}
+}
+
 func TestHostsEntriesRejectTrailingFields(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
