@@ -15,10 +15,10 @@ import (
 )
 
 func main() {
-	input := flag.String("input", "filters.txt", "legacy-compatible filter-list")
+	input := flag.String("input", "filters/adblock.txt", "legacy-compatible filter-list")
 	output := flag.String("output", "dist/adblock.dat", "unindexed Chromium ruleset")
 	converter := flag.String("converter", "deps/ruleset_converter", "ruleset_converter executable")
-	logPath := flag.String("log", "build/ruleset-converter.log", "converter log")
+	logPath := flag.String("log", "build/work/adblock/ruleset-converter.log", "converter log")
 	timeout := flag.Duration("timeout", 5*time.Minute, "converter timeout")
 	flag.Parse()
 
