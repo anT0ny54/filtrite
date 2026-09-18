@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
-file="${1:-filters.txt}"
+file="${1:-filters/adblock.txt}"
 [[ -s "$file" ]] || { echo "ERROR: missing/empty $file" >&2; exit 1; }
 awk '
 BEGIN{bad=0}
@@ -18,9 +18,11 @@ BEGIN{bad=0}
   #     "~" (filter.go only ever emits a single sign per rule, but this
   #     check is line-local and does not re-derive that invariant here;
   #     Chromium ruleset_converter remains the authoritative final parser)
-  #   - whitelist-only (ActivationType) keywords: document, elemhide,
-  #     generichide, genericblock (never negated)
+  #   - whitelist-only (ActivationType) keywords: document, genericblock
+  #     (never negated; CSS-related activation types and popup are rejected)
   line=$0
+  exception=0
+  if(line~/^@@/) exception=1
   dollar=0
   for(i=length(line);i>=1;i--){ if(substr(line,i,1)=="$"){dollar=i;break} }
   if(dollar>0){
@@ -33,8 +35,11 @@ BEGIN{bad=0}
         p=parts[j]
         if(p=="third-party"||p=="~third-party"||p=="match-case")continue
         if(p~/^domain=[^,]+$/)continue
-        if(p~/^~?(script|image|stylesheet|object|xmlhttprequest|object-subrequest|subdocument|ping|media|font|websocket|other|popup)$/)continue
-        if(p=="document"||p=="elemhide"||p=="generichide"||p=="genericblock")continue
+        if(p~/^~?(script|image|stylesheet|object|xmlhttprequest|object-subrequest|subdocument|ping|media|font|websocket|other)$/)continue
+        if(p=="document"||p=="genericblock"){
+          if(!exception){print "activation-not-exception: " NR;bad=1}
+          continue
+        }
         print "unsupported modifier: " NR;bad=1
       }
     }
