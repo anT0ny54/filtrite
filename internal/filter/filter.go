@@ -201,7 +201,7 @@ func (Builder) normalize(line string) (string, string, bool) {
 		}
 	}
 
-	rule, reason, ok := normalizeNetwork(line)
+	rule, reason, ok := normalizeNetwork(line, exception)
 	if !ok {
 		if reason != "" {
 			return "", reason, false
@@ -217,11 +217,11 @@ func (Builder) normalize(line string) (string, string, bool) {
 	return rule, "", true
 }
 
-func normalizeNetwork(line string) (string, string, bool) {
+func normalizeNetwork(line string, exception bool) (string, string, bool) {
 	pattern := line
 	modSuffix := ""
 	if idx := strings.LastIndexByte(line, '$'); idx >= 0 {
-		suffix, ok := parseModifiers(line[idx+1:])
+		suffix, ok := parseModifiers(line[idx+1:], exception)
 		if !ok {
 			return "", "unsupported-modifier", false
 		}
@@ -268,10 +268,33 @@ func normalizeNetwork(line string) (string, string, bool) {
 	return "", "", false
 }
 
+// elementTypeOptions are the resource-type keywords Chromium's legacy
+// subresource_filter rule_parser recognizes as tristate ElementType options
+// (see components/subresource_filter/tools/rule_parser/rule_parser.cc). Each
+// one may appear negated (e.g. "~image"), but a single rule may not mix
+// positive and negative element types: which sign is used first decides
+// whether the unspecified types start out included or excluded, so only a
+// uniform sign per rule keeps the result independent of token order and
+// therefore safe to canonicalize by sorting.
+var elementTypeOptions = map[string]struct{}{
+	"script": {}, "image": {}, "stylesheet": {}, "object": {},
+	"xmlhttprequest": {}, "object-subrequest": {}, "subdocument": {},
+	"ping": {}, "media": {}, "font": {}, "websocket": {}, "other": {}, "popup": {},
+}
+
+// activationTypeOptions are the ActivationType keywords, which the upstream
+// parser marks whitelist-only (FLAG_IS_WHITELIST_ONLY) and non-tristate: they
+// may only appear on "@@" exception rules and never negated. Each one simply
+// ORs a bit into the rule, independent of every other option, so any subset
+// of them can be safely reordered/sorted.
+var activationTypeOptions = map[string]struct{}{
+	"document": {}, "elemhide": {}, "generichide": {}, "genericblock": {},
+}
+
 // parseModifiers accepts only modifiers supported by the legacy Chromium
 // rule parser for the subset this project intentionally emits. Duplicate or
 // conflicting modifiers are rejected instead of being resolved implicitly.
-func parseModifiers(opts string) (string, bool) {
+func parseModifiers(opts string, exception bool) (string, bool) {
 	if opts == "" {
 		return "", false
 	}
@@ -279,6 +302,18 @@ func parseModifiers(opts string) (string, bool) {
 	var matchCase bool
 	var domains string
 	seen := make(map[string]struct{}, 3)
+
+	// Resource-type (ElementType) options: same-sign-only, see comment above.
+	var typeNegated *bool
+	typeSeen := make(map[string]struct{}, 4)
+	var typeNames []string
+
+	// Whitelist-only ActivationType options: never negated, plain set union.
+	activationSeen := make(map[string]struct{}, 4)
+	var activationNames []string
+
+	usingElementType := false
+	usingActivationType := false
 
 	for _, token := range strings.Split(opts, ",") {
 		if token == "" {
@@ -296,6 +331,41 @@ func parseModifiers(opts string) (string, bool) {
 		name, value, hasValue := nameValue, "", false
 		if i := strings.IndexByte(nameValue, '='); i >= 0 {
 			name, value, hasValue = nameValue[:i], nameValue[i+1:], true
+		}
+
+		if _, ok := elementTypeOptions[name]; ok {
+			// Values aren't valid on ElementType options, and mixing them
+			// with ActivationType options in the same rule isn't a pattern
+			// real filter lists use, so it's rejected rather than guessed at.
+			if hasValue || usingActivationType {
+				return "", false
+			}
+			if _, exists := typeSeen[name]; exists {
+				return "", false
+			}
+			if typeNegated == nil {
+				n := negated
+				typeNegated = &n
+			} else if *typeNegated != negated {
+				return "", false
+			}
+			typeSeen[name] = struct{}{}
+			typeNames = append(typeNames, name)
+			usingElementType = true
+			continue
+		}
+
+		if _, ok := activationTypeOptions[name]; ok {
+			if hasValue || negated || usingElementType || !exception {
+				return "", false
+			}
+			if _, exists := activationSeen[name]; exists {
+				return "", false
+			}
+			activationSeen[name] = struct{}{}
+			activationNames = append(activationNames, name)
+			usingActivationType = true
+			continue
 		}
 
 		switch name {
@@ -336,6 +406,20 @@ func parseModifiers(opts string) (string, bool) {
 	}
 
 	var parts []string
+	if len(typeNames) > 0 {
+		sort.Strings(typeNames)
+		prefix := ""
+		if typeNegated != nil && *typeNegated {
+			prefix = "~"
+		}
+		for _, n := range typeNames {
+			parts = append(parts, prefix+n)
+		}
+	}
+	if len(activationNames) > 0 {
+		sort.Strings(activationNames)
+		parts = append(parts, activationNames...)
+	}
 	if thirdParty != "" {
 		parts = append(parts, thirdParty)
 	}

@@ -19,7 +19,7 @@ func TestBuilderAndOptimizer(t *testing.T) {
 		"0.0.0.0 ads.example",
 		"example.net",
 		"example.net##.ad",
-		"||bad.com^$script",
+		"||bad.com^$sitekey=abc123",
 	}, "\n")
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
@@ -240,6 +240,111 @@ func TestRuleWhitespaceIsRejected(t *testing.T) {
 	}
 	if len(rules) != 1 || st.Rejected != 1 || st.ByReason["non-ascii-or-whitespace"] != 1 {
 		t.Fatalf("rules=%v stats=%+v", rules, st)
+	}
+}
+
+func TestElementTypeModifiers(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	input := strings.Join([]string{
+		"||ads.example^$image,script",
+		"||sorted.example^$xmlhttprequest,font",
+		"||neg.example^$~image,~stylesheet",
+		"||mixed.example^$script,~image",
+		"||dup.example^$script,script",
+		"||withtp.example^$object-subrequest,third-party,domain=foo.example",
+		"||popup.example^$popup",
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]bool{}
+	for _, r := range rules {
+		present[r] = true
+	}
+	for _, want := range []string{
+		"||ads.example^$image,script",
+		"||sorted.example^$font,xmlhttprequest",
+		"||neg.example^$~image,~stylesheet",
+		"||withtp.example^$object-subrequest,third-party,domain=foo.example",
+		"||popup.example^$popup",
+	} {
+		if !present[want] {
+			t.Fatalf("missing %q in %v", want, rules)
+		}
+	}
+	// A rule that mixes positive and negative element types, or repeats one,
+	// is order-dependent (or ambiguous) to canonicalize, so it must have been
+	// rejected rather than silently accepted/approximated.
+	for _, unwanted := range []string{"mixed.example", "dup.example"} {
+		for _, r := range rules {
+			if strings.Contains(r, unwanted) {
+				t.Fatalf("rule for %q should have been rejected, got %q", unwanted, r)
+			}
+		}
+	}
+	if got := st.ByReason["unsupported-modifier"]; got != 2 {
+		t.Fatalf("unsupported-modifier=%d, want 2 (mixed-polarity + duplicate); reasons=%v", got, st.ByReason)
+	}
+}
+
+func TestActivationTypeModifiersAreExceptionOnly(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	input := strings.Join([]string{
+		"@@||safe.example^$document,elemhide",
+		"||blocked.example^$document",          // not an exception rule: rejected
+		"@@||neg.example^$~document",            // activation types aren't tristate: rejected
+		"@@||both.example^$script,generichide", // can't mix element and activation types
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := map[string]bool{}
+	for _, r := range rules {
+		present[r] = true
+	}
+	if !present["@@||safe.example^$document,elemhide"] {
+		t.Fatalf("missing accepted activation-type exception rule in %v", rules)
+	}
+	if len(rules) != 1 {
+		t.Fatalf("rules=%v, want exactly 1 accepted rule", rules)
+	}
+	if got := st.ByReason["unsupported-modifier"]; got != 3 {
+		t.Fatalf("unsupported-modifier=%d, want 3; reasons=%v", got, st.ByReason)
+	}
+}
+
+func TestElementTypeModifiersSurviveOptimize(t *testing.T) {
+	// Optimize must not disturb resource-type/activation modifiers: the
+	// third-party guard only ever applies to a completely bare "||host^" or
+	// "||host|" pattern, never to one that already carries any "$" options.
+	rules := []string{
+		"||a.example^$script,image",
+		"@@||b.example^$document",
+	}
+	final, duplicates := Optimize(rules)
+	if duplicates != 0 || len(final) != 2 {
+		t.Fatalf("final=%v duplicates=%d", final, duplicates)
+	}
+	present := map[string]bool{}
+	for _, r := range final {
+		present[r] = true
+	}
+	for _, want := range rules {
+		if !present[want] {
+			t.Fatalf("missing %q in %v", want, final)
+		}
 	}
 }
 
