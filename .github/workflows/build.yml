@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     paths:
-      - "lists/adblock.txt"
+      - "lists/*.txt"
       - "custom-rules.txt"
       - "cmd/**"
       - "internal/**"
@@ -44,7 +44,6 @@ jobs:
         run: |
           chmod +x build.sh scripts/validate.sh
           ./build.sh
-          ./scripts/validate.sh filters.txt
 
       - name: Publish release artifact
         uses: softprops/action-gh-release@v2
@@ -53,11 +52,10 @@ jobs:
           target_commitish: ${{ github.sha }}
           name: Legacy Bromite/Cromite adblock ${{ github.run_number }}
           body: |
-            Generated from filters.txt using Chromium's ruleset_converter.
-            Legacy target: unindexed-ruleset.
+            Generated from every lists/*.txt manifest using Chromium's ruleset_converter.
+            Each manifest produces a matching dist/<name>.dat legacy unindexed ruleset.
           files: |
-            dist/adblock.dat
-            filters.txt
+            dist/*.dat
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
