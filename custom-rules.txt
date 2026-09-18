@@ -1,6 +1,8 @@
-! Optional custom rules.
+! Optional custom rules, applied to every list under lists/*.txt.
 ! Keep only network rules supported by the legacy Bromite/Cromium subresource filter.
 ! Examples:
 ! ||example.com^
 ! ||example.com/ads/*
+! ||example.com/ads.js$script,third-party
 ! @@||example.com/allowed^
+! @@||example.com^$document
