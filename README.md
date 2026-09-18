@@ -195,7 +195,7 @@ These are unrelated to the projects above but are run by the same maintainer.
 | Service | DNS-over-HTTPS URL |
 | --- | --- |
 | Multi Pro + TIF (Recommended) | `https://freedns.koyeb.app/dns-query` |
-| Multi Pro + TIF (Recommended) | `https://freedns-six.vercel.app/api/doh/dns-query` |
+| Multi Pro + TIF (Recommended) | `https://dns-pi.vercel.app/api/doh/dns-query` |
 | Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
 | Multi Pro + TIF (Recommended, but will sleep if not used within 15 minutes) | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
 
