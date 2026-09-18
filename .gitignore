@@ -1,4 +1,6 @@
 build/
 deps/
 dist/
+filters/
+filters.txt
 *.tmp*

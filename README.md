@@ -8,14 +8,14 @@ Filtrite builds a **legacy Chromium `subresource_filter`** network-filter list a
 
 The build has two stages, run once per source manifest (see "Multiple named lists" below):
 
-1. `internal/filter` downloads a manifest's source lists, validates each line, canonicalizes supported network rules, rejects unsupported syntax, deduplicates exact duplicates, and writes `filters/<name>.txt`.
-2. `internal/ruleset` passes that already-filtered list to Chromium's `ruleset_converter` with `--input_format=filter-list --output_format=unindexed-ruleset`, producing `dist/<name>.dat`.
+1. `legacy-filter-builder` downloads a manifest's source lists, validates each line, canonicalizes supported network rules, rejects unsupported syntax, and streams accepted rules through an external sort/merge so the complete rule set is not held in RAM. A shared per-build source cache avoids downloading the same URL again for another manifest.
+2. `filtrite` passes the sorted legacy-compatible list to Chromium's `ruleset_converter` with `--input_format=filter-list --output_format=unindexed-ruleset`, producing `dist/<name>.dat`.
 
 Chromium documents this `ruleset_converter` flow for development/testing of custom legacy `subresource_filter` rulesets.
 
-With only the default `lists/adblock.txt` present, `<name>` is `adblock`, so this is exactly the single `filters/adblock.txt` / `dist/adblock.dat` pair the project has always produced. `dist/adblock.dat`'s path is unchanged from earlier versions of this project.
+With only the default `lists/adblock.txt` present, `<name>` is `adblock`, so the build produces `filters/adblock.txt` as an intermediate text artifact and `dist/adblock.dat` as the release artifact. `dist/adblock.dat`'s path is unchanged from earlier versions of this project.
 
-`build.sh` also copies `filters/adblock.txt` to a root-level `filters.txt`. This copy exists purely so the existing `.github/workflows/build.yml` release step — intentionally left untouched here — keeps publishing that exact asset name without modification.
+Generated `filters/`, `dist/`, and `build/` content is cleaned at the start of every build. The release workflow publishes the matching `dist/<name>.dat` files and no redundant root-level `filters.txt` copy.
 
 ## 🧩 Legacy filter syntax policy
 
@@ -31,8 +31,8 @@ The generated `filters/<name>.txt` files are deliberately **not** the output of 
   - `$third-party` / `$~third-party`
   - `$match-case`
   - `$domain=example.com|~excluded.example`
-  - Resource-type (`ElementType`) filters — `script`, `image`, `stylesheet`, `object`, `xmlhttprequest`, `object-subrequest`, `subdocument`, `ping`, `media`, `font`, `websocket`, `other`, `popup` — each optionally negated with `~` (e.g. `$script,image` or `$~image,~stylesheet`). **A single rule must use one sign only**: Chromium's parser decides whether the unspecified types start out included or excluded based on the *first* type's sign, so mixing `script,~image` in one rule is order-dependent and is rejected rather than guessed at.
-  - Whitelist-only (`ActivationType`) filters — `document`, `elemhide`, `generichide`, `genericblock` — only on `@@` exception rules, never negated (e.g. `@@||example.com^$document`). These can't be combined with resource-type filters in the same rule.
+  - Resource-type (`ElementType`) filters — `script`, `image`, `stylesheet`, `object`, `xmlhttprequest`, `object-subrequest`, `subdocument`, `ping`, `media`, `font`, `websocket`, `other` — each optionally negated with `~` (e.g. `$script,image` or `$~image,~stylesheet`). `popup` is rejected because the legacy indexed engine strips popup element types. **A single rule must use one sign only**: Chromium's parser decides whether the unspecified types start out included or excluded based on the *first* type's sign, so mixing `script,~image` in one rule is order-dependent and is rejected rather than guessed at.
+  - Whitelist-only (`ActivationType`) filters — `document`, `genericblock` — only on `@@` exception rules, never negated (e.g. `@@||example.com^$document`). CSS-related `elemhide` and `generichide` are rejected because the legacy indexed engine removes those activation bits. These activation filters can't be combined with resource-type filters in the same rule.
 
 Modifier duplicates and conflicts are rejected rather than resolved implicitly. Domain lists are validated and canonicalized into Chromium's deterministic ordering — longest domain first, then lexicographically within equal-length groups. Because Chromium's parser stores first/third-party state, case sensitivity, resource type, activation type, and initiator-domain constraints as distinct rule metadata, none of these scopes are collapsed together.
 
@@ -52,7 +52,7 @@ Other metadata-scoped rules are **not** removed merely because a broader host ru
 
 ## Rejected-rule reports
 
-Every build writes `build/<name>/rejected-*.txt` reports for each list `<name>` (see "Multiple named lists" below). Each report contains the original source line number, rejection reason, and sanitized original rule so unsupported syntax is auditable rather than silently discarded.
+Every build writes `build/work/<name>/rejected-*.txt` reports for each list `<name>` (see "Multiple named lists" below). Each report contains the original source line number, rejection reason, and sanitized original rule so unsupported syntax is auditable rather than silently discarded.
 
 ## 🌐 Source lists
 
@@ -62,11 +62,15 @@ Source URLs must be valid **HTTPS URLs without embedded credentials**. Invalid e
 
 The downloader also enforces per-source and combined download-size limits, follows a small bounded number of redirects, refuses HTTPS→HTTP downgrade redirects, rejects obvious HTML error pages, and preserves source result order for deterministic reporting.
 
-A single source failing to download (a dead mirror, a transient 5xx, etc.) does not abort the build: the builder logs a warning and continues with whatever sources succeeded. The build only fails outright if the download run is cut short by cancellation/timeout or if every configured source failed.
+The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
+
+All configured source downloads are release-critical by default. If any source fails, `legacy-filter-builder` refuses to publish a partial ruleset. This prevents a transient mirror failure from silently reducing a release. For an explicitly intentional partial build, pass `--allow-partial`; cancellation and timeout remain fatal.
+
+When multiple manifests contain the same source URL, a shared cache directory can reuse the already downloaded file so the URL is fetched only once during that build.
 
 ## 🧾 Multiple named lists
 
-`build.sh` builds **every** manifest under `lists/*.txt`, independently, into its own `filters/<name>.txt` and `dist/<name>.dat` (`<name>` is the manifest's filename without `.txt`). `custom-rules.txt` is layered onto every list the same way.
+`build.sh` builds **every** manifest under `lists/*.txt`, independently, into its own `filters/<name>.txt` intermediate and `dist/<name>.dat` release artifact (`<name>` is the manifest's filename without `.txt`). `custom-rules.txt` is layered onto every list the same way, while identical source URLs are reused from the shared per-build download cache.
 
 To add another list (e.g. a smaller or region-specific one), drop a new manifest next to the default one:
 
@@ -84,7 +88,7 @@ Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS
 
 1. **The repository is an actual GitHub fork of `xarantolus/filtrite`** (created with GitHub's "Fork" button, so it appears in that repository's fork network) — not a copy pushed to a brand-new repository. This tool can't create or verify that relationship for you; it's a one-time decision made when the repository is created on GitHub.
 2. **`lists/*.txt` manifests exist with the names you want listed**, which `build.sh` now builds automatically into matching `dist/<name>.dat` files (see "Multiple named lists" above) — this part is handled.
-3. **The latest GitHub Release publishes one asset per list, named `<name>.dat`.** This repository's own `.github/workflows/build.yml` currently publishes only `dist/adblock.dat` and `filters.txt` as fixed asset names (see its `files:` list). Changing that is out of scope here, since workflow files were intentionally left untouched. If you add more lists and want them discoverable, update that one `files:` entry yourself to `dist/*.dat` (optionally also `filters/*.txt`) so every generated list is published as its own asset.
+3. **The latest GitHub Release publishes one asset per list, named `<name>.dat`.** This repository's `.github/workflows/build.yml` already publishes `dist/*.dat`, so every manifest under `lists/*.txt` is released automatically under its matching name.
 
 Scheduled GitHub Actions workflows are disabled after 60 days without a commit to the repository, so an inactive fork eventually stops publishing new releases and drops out of search results until something is pushed again.
 
@@ -93,7 +97,7 @@ Scheduled GitHub Actions workflows are disabled after 60 days without a commit t
 Requirements:
 
 - Go 1.23+ for this source tree.
-- `curl` and `unzip` when `deps/ruleset_converter` is not already present.
+- `curl`, `unzip`, and `sha256sum` when `deps/ruleset_converter` is not already present.
 - A Linux-compatible Chromium `ruleset_converter` binary.
 
 Run:
@@ -106,16 +110,36 @@ Outputs (per list `<name>`, see "Multiple named lists" below):
 
 ```text
 filters/<name>.txt
-build/<name>/rejected-*.txt
+build/work/<name>/rejected-*.txt
+build/work/<name>/ruleset-converter.log
 dist/<name>.dat
-build/<name>/ruleset-converter.log
 ```
 
-With only the default `lists/adblock.txt`, that's `filters/adblock.txt`, `build/adblock/rejected-*.txt`, `dist/adblock.dat`, and `build/adblock/ruleset-converter.log`.
+With only the default `lists/adblock.txt`, that's `filters/adblock.txt`, `build/work/adblock/rejected-*.txt`, `build/work/adblock/ruleset-converter.log`, and `dist/adblock.dat`.
 
-The converter archive is pinned by tag in `build.sh`. For supply-chain hardening, `CONVERTER_SHA256` may be set to the expected SHA-256 of the archive; the build will then fail on mismatch.
+For direct builder use, partial source failures are disabled by default. Use `--allow-partial` only when an intentionally incomplete build is acceptable:
 
-Bromite's updater rejects a filters file larger than **20 MiB** (`kMaxBodySize` in `Bromite-subresource-adblocker.patch`). `build.sh` checks `dist/adblock.dat` against this limit and prints a warning if it is exceeded; trim `lists/adblock.txt` if that happens.
+```sh
+./build/legacy-filter-builder \
+  --sources lists/adblock.txt \
+  --custom custom-rules.txt \
+  --output filters/adblock.txt \
+  --build-dir build/work/adblock \
+  --cache-dir build/source-cache \
+  --allow-partial
+```
+
+`build.sh` does not pass `--allow-partial`, so release builds remain complete-or-fail.
+
+The converter archive is pinned by tag, URL, and SHA-256 in `build.sh`. The current pinned archive is verified automatically on first install. When changing the converter tag or URL, also provide the SHA-256 of that exact archive:
+
+```sh
+CONVERTER_SHA256=<64-hex-sha256> ./build.sh
+```
+
+The verified converter is recorded in `deps/ruleset_converter.lock`, including the archive and extracted-binary hashes. Later builds reuse it only when the tag and URL match and the local binary hash still matches the lock. Changing the converter pin automatically requires a new checksum and download.
+
+`build.sh` enforces a **20 MiB default maximum** for every generated `dist/<name>.dat` ruleset and fails the build immediately if a ruleset exceeds it. Override the ceiling explicitly with `MAX_RULESET_BYTES=<bytes>` when a different target limit is required.
 
 ## ✅ Validation
 
@@ -148,7 +172,7 @@ For Cromite, use this output only when the specific build/configuration you are 
 3. Edit `custom-rules.txt` for local legacy-compatible network rules; it's applied to every list.
 4. Run the test suite (`go test ./...`).
 5. Run `./build.sh`.
-6. Publish `dist/<name>.dat` and/or `filters/<name>.txt` from your own release process.
+6. Publish the generated `dist/<name>.dat` assets from your release process.
 
 Keep custom rules within the supported syntax policy above. A rule that is useful in uBlock Origin may still be invalid for this legacy engine.
 
@@ -156,7 +180,7 @@ Keep custom rules within the supported syntax policy above. A rule that is usefu
 
 Third-party filter sources keep their own licenses and terms. Do not assume that the MIT license covering this repository also licenses the downloaded filter content.
 
-The GitHub Actions workflow runs tests before building and validating the generated list. Releases currently contain the generated `dist/adblock.dat` and `filters.txt` artifacts (see "What the build produces" above for why `filters.txt` exists as a compatibility copy). If you add more lists under `lists/*.txt` and want each published as its own release asset — required for filterlists.010.one to discover them, see "Publishing to filterlists.010.one" above — widen the workflow's `files:` list to `dist/*.dat`.
+The GitHub Actions workflow runs tests before building and validates every generated list. Pushes touching any `lists/*.txt` manifest trigger the build, and releases publish every generated `dist/*.dat` asset. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
 
 ## 📄 License
 
