@@ -12,8 +12,14 @@ BEGIN{bad=0}
   if($0~/\+js\(|:has-text\(|:contains\(|:matches-css\(|:xpath\(|:style\(/){print "scriptlet/procedural: " NR;bad=1}
   if($0~/^\/.*\/$/){print "regex: " NR;bad=1}
 
-  # Secondary sanity check for the modifier subset emitted by filter.go.
-  # Chromium ruleset_converter remains the authoritative final parser.
+  # Secondary sanity check for the modifier subset emitted by filter.go:
+  #   - third-party / ~third-party, match-case, domain=...
+  #   - resource-type (ElementType) keywords, each optionally negated with
+  #     "~" (filter.go only ever emits a single sign per rule, but this
+  #     check is line-local and does not re-derive that invariant here;
+  #     Chromium ruleset_converter remains the authoritative final parser)
+  #   - whitelist-only (ActivationType) keywords: document, elemhide,
+  #     generichide, genericblock (never negated)
   line=$0
   dollar=0
   for(i=length(line);i>=1;i--){ if(substr(line,i,1)=="$"){dollar=i;break} }
@@ -27,6 +33,8 @@ BEGIN{bad=0}
         p=parts[j]
         if(p=="third-party"||p=="~third-party"||p=="match-case")continue
         if(p~/^domain=[^,]+$/)continue
+        if(p~/^~?(script|image|stylesheet|object|xmlhttprequest|object-subrequest|subdocument|ping|media|font|websocket|other|popup)$/)continue
+        if(p=="document"||p=="elemhide"||p=="generichide"||p=="genericblock")continue
         print "unsupported modifier: " NR;bad=1
       }
     }
