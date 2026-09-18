@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,10 +33,11 @@ const (
 var ErrTooLarge = errors.New("download too large")
 
 type Result struct {
-	URL   string
-	Path  string
-	Bytes int64
-	Err   error
+	URL    string
+	Path   string
+	Bytes  int64
+	Err    error
+	Cached bool
 }
 
 type client struct{ http *http.Client }
@@ -105,6 +107,18 @@ func URLsFromFile(path string) ([]string, error) {
 }
 
 func All(ctx context.Context, urls []string, dir string, workers, retries int, timeout time.Duration) ([]Result, error) {
+	return all(ctx, urls, dir, "", workers, retries, timeout)
+}
+
+// AllWithCache shares successfully downloaded sources across multiple list
+// manifests. The cache is deliberately keyed by the canonical URL and uses
+// atomic replacement, so a later manifest in the same build can reuse a
+// source without downloading it again.
+func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, workers, retries int, timeout time.Duration) ([]Result, error) {
+	return all(ctx, urls, dir, cacheDir, workers, retries, timeout)
+}
+
+func all(ctx context.Context, urls []string, dir, cacheDir string, workers, retries int, timeout time.Duration) ([]Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -119,6 +133,11 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create download directory: %w", err)
+	}
+	if cacheDir != "" {
+		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+			return nil, fmt.Errorf("create source cache directory: %w", err)
+		}
 	}
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no URLs")
@@ -139,25 +158,45 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 	results := make([]Result, len(urls))
 	budget := MaxTotalBytes
 
+	// Cached files are returned immediately and do not consume the network
+	// download budget because they were already accounted for when written.
+	missing := make([]job, 0, len(urls))
+	for i, rawURL := range urls {
+		if cacheDir != "" {
+			if path, n, ok := cachedFile(cacheDir, rawURL); ok {
+				results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true}
+				continue
+			}
+		}
+		missing = append(missing, job{index: i, url: rawURL})
+	}
+	if len(missing) == 0 {
+		return results, nil
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				path, n, err := get(ctx, c, j.url, dir, retries, &budget)
+				destination := dir
+				if cacheDir != "" {
+					destination = cacheDir
+				}
+				path, n, err := get(ctx, c, j.url, destination, retries, &budget)
 				results[j.index] = Result{URL: j.url, Path: path, Bytes: n, Err: err}
 			}
 		}()
 	}
 
-	for i, rawURL := range urls {
+	for _, j := range missing {
 		select {
-		case jobs <- job{index: i, url: rawURL}:
+		case jobs <- j:
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
-			return results[:i], ctx.Err()
+			return results, ctx.Err()
 		}
 	}
 	close(jobs)
@@ -173,6 +212,22 @@ func All(ctx context.Context, urls []string, dir string, workers, retries int, t
 		return results, errors.Join(errs...)
 	}
 	return results, nil
+}
+
+func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
+	path := filepath.Join(cacheDir, shaName(rawURL)+".txt")
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaxSourceBytes {
+		if err == nil {
+			_ = os.Remove(path)
+		}
+		return "", 0, false
+	}
+	if htmlError(path) {
+		_ = os.Remove(path)
+		return "", 0, false
+	}
+	return path, info.Size(), true
 }
 
 func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
@@ -265,7 +320,18 @@ func (r *budgetReader) Read(p []byte) (int, error) {
 	for {
 		remaining := atomic.LoadInt64(r.remaining)
 		if remaining <= 0 {
-			return 0, ErrTooLarge
+			// We may have consumed the final permitted byte exactly. Probe the
+			// underlying reader once so an actual EOF is accepted, while any
+			// additional source byte still fails the global budget.
+			var probe [1]byte
+			n, err := r.r.Read(probe[:])
+			if n > 0 {
+				return 0, ErrTooLarge
+			}
+			if err == nil {
+				continue
+			}
+			return 0, err
 		}
 
 		want := int64(len(p))
@@ -305,13 +371,14 @@ func (e *statusError) Error() string {
 	return "unexpected HTTP status: " + strconv.Itoa(e.Code) + " " + e.Status
 }
 func retryable(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTooLarge) {
 		return false
 	}
 	var s *statusError
 	if errors.As(err, &s) {
 		return s.Code == 408 || s.Code == 429 || s.Code == 500 || s.Code == 502 || s.Code == 503 || s.Code == 504
 	}
-	return !errors.Is(err, ErrTooLarge)
+	var netErr net.Error
+	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
 }
 func shaName(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
