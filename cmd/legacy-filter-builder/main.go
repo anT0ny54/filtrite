@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -18,59 +19,76 @@ import (
 func main() {
 	sources := flag.String("sources", "lists/adblock.txt", "HTTPS source list")
 	custom := flag.String("custom", "custom-rules.txt", "optional local custom rules; empty disables")
-	output := flag.String("output", "filters.txt", "generated legacy-compatible filter-list")
-	buildDir := flag.String("build-dir", "build", "build/report directory")
+	output := flag.String("output", "filters/adblock.txt", "generated legacy-compatible filter-list")
+	buildDir := flag.String("build-dir", "build/work/adblock", "build/report directory")
+	cacheDir := flag.String("cache-dir", "", "optional shared source-download cache directory")
+	allowPartial := flag.Bool("allow-partial", false, "continue when one or more source downloads fail")
 	flag.Parse()
-	if err := run(*sources, *custom, *output, *buildDir); err != nil {
+	if err := run(*sources, *custom, *output, *buildDir, *cacheDir, *allowPartial); err != nil {
 		log.Fatal(err)
 	}
 }
 
-func run(sources, custom, outFile, buildDir string) error {
+func run(sources, custom, outFile, buildDir, cacheDir string, allowPartial bool) error {
 	urls, err := download.URLsFromFile(sources)
 	if err != nil {
 		return err
 	}
-	raw := filepath.Join(buildDir, "raw")
-	if err := os.RemoveAll(raw); err != nil {
+	workDir := filepath.Join(buildDir, "raw")
+	if err := os.RemoveAll(workDir); err != nil {
 		return err
 	}
-	if err := os.MkdirAll(raw, 0755); err != nil {
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
 		return err
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	results, downloadErr := download.All(ctx, urls, raw, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
+	results, downloadErr := download.AllWithCache(ctx, urls, workDir, cacheDir, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
 	successful := 0
 	for _, result := range results {
 		if result.Err == nil {
 			successful++
 		}
 	}
-	fmt.Printf("Sources: %d configured, %d downloaded\n", len(urls), successful)
-
-	// A single flaky third-party mirror should not abort the whole build:
-	// each source is independent, and internal/download already preserves
-	// a per-URL result specifically so the build can proceed with whatever
-	// succeeded. Only treat this as fatal if the run was cut short by
-	// cancellation/timeout (results may be incomplete) or if nothing at
-	// all was downloaded.
-	if downloadErr != nil {
-		if ctx.Err() != nil {
-			return fmt.Errorf("source download failed: %w", downloadErr)
+	cached := 0
+	for _, result := range results {
+		if result.Err == nil && result.Cached {
+			cached++
 		}
+	}
+	fmt.Printf("Sources: %d configured, %d succeeded", len(urls), successful)
+	if cached > 0 {
+		fmt.Printf(" (%d cache hits, %d downloads)", cached, successful-cached)
+	}
+	fmt.Println()
+
+	if downloadErr != nil {
 		for _, result := range results {
 			if result.Err != nil {
-				fmt.Fprintf(os.Stderr, "WARNING: skipping source %s: %v\n", result.URL, result.Err)
+				fmt.Fprintf(os.Stderr, "WARNING: source %s failed: %v\n", result.URL, result.Err)
 			}
 		}
+		if errors.Is(downloadErr, context.Canceled) || errors.Is(downloadErr, context.DeadlineExceeded) {
+			return fmt.Errorf("source download canceled: %w", downloadErr)
+		}
+		if !allowPartial {
+			return fmt.Errorf("source download failed; refusing to publish a partial ruleset: %w", downloadErr)
+		}
+		fmt.Fprintln(os.Stderr, "WARNING: continuing with a partial ruleset because --allow-partial was set")
 	}
 	if successful == 0 {
-		return fmt.Errorf("source download failed: %w", downloadErr)
+		if downloadErr != nil {
+			return fmt.Errorf("source download failed: no sources succeeded: %w", downloadErr)
+		}
+		return fmt.Errorf("source download failed: no sources succeeded")
 	}
 
+	sortDir := filepath.Join(buildDir, "sort")
+	sorter, err := filter.NewExternalSorter(sortDir, filter.DefaultSortChunkBytes)
+	if err != nil {
+		return err
+	}
 	b := filter.Builder{}
-	var allRules []string
 	var totalRead, totalRejected int
 	for _, r := range results {
 		if r.Err != nil {
@@ -78,11 +96,10 @@ func run(sources, custom, outFile, buildDir string) error {
 		}
 		name := shortHash(r.URL)
 		rej := filepath.Join(buildDir, "rejected-"+name+".txt")
-		rules, st, err := b.ReadFile(r.Path, rej)
+		st, err := b.ReadFileToSink(r.Path, rej, sorter.Add)
 		if err != nil {
 			return err
 		}
-		allRules = append(allRules, rules...)
 		totalRead += st.Read
 		totalRejected += st.Rejected
 	}
@@ -95,23 +112,27 @@ func run(sources, custom, outFile, buildDir string) error {
 			return fmt.Errorf("custom rules %q is a directory", custom)
 		}
 		if info.Size() > 0 {
-			rules, st, err := b.ReadFile(custom, filepath.Join(buildDir, "rejected-custom.txt"))
+			st, err := b.ReadFileToSink(custom, filepath.Join(buildDir, "rejected-custom.txt"), sorter.Add)
 			if err != nil {
 				return err
 			}
-			allRules = append(allRules, rules...)
 			totalRead += st.Read
 			totalRejected += st.Rejected
 		}
 	}
-	final, red := filter.Optimize(allRules)
-	if len(final) == 0 {
-		return fmt.Errorf("no compatible rules generated")
-	}
-	if err := filter.Write(outFile, final); err != nil {
+	result, err := sorter.Finish(outFile)
+	if err != nil {
 		return err
 	}
-	fmt.Printf("Read rules: %d; rejected: %d; duplicate rules removed: %d; output rules: %d\n", totalRead, totalRejected, red, len(final))
+	info, err := os.Stat(outFile)
+	if err != nil {
+		return fmt.Errorf("generated filter list: %w", err)
+	}
+	if info.Size() == 0 {
+		return fmt.Errorf("generated filter list is empty")
+	}
+	fmt.Printf("Read lines: %d; rejected: %d; duplicate rules removed: %d; output rules: %d\n", totalRead, totalRejected, result.Duplicates, result.Rules)
 	return nil
 }
+
 func shortHash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:6]) }
