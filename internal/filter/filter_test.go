@@ -54,6 +54,67 @@ func TestBuilderAndOptimizer(t *testing.T) {
 	}
 }
 
+func TestBareHostWithoutTerminatorIsRejected(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	if err := os.WriteFile(in, []byte("||bare.example\n||terminated.example^\n||ended.example|\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st, err := (Builder{}).ReadFile(in, rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rules) != 2 {
+		t.Fatalf("rules=%v, want exactly 2 accepted rules", rules)
+	}
+	for _, want := range []string{"||terminated.example^", "||ended.example|"} {
+		found := false
+		for _, got := range rules {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing %q in %v", want, rules)
+		}
+	}
+	if st.ByReason["unterminated-host-rule"] != 1 {
+		t.Fatalf("unterminated-host-rule=%d, want 1; reasons=%v", st.ByReason["unterminated-host-rule"], st.ByReason)
+	}
+}
+
+func TestReadFileWithSeenDeduplicatesAcrossFiles(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.txt")
+	second := filepath.Join(dir, "second.txt")
+	rej1 := filepath.Join(dir, "rej1.txt")
+	rej2 := filepath.Join(dir, "rej2.txt")
+	if err := os.WriteFile(first, []byte("||same.example^\n||first.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("||same.example^\n||second.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	seen := make(map[string]struct{})
+	b := Builder{}
+	firstRules, firstStats, err := b.ReadFileWithSeen(first, rej1, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRules, secondStats, err := b.ReadFileWithSeen(second, rej2, seen)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(firstRules) != 2 || len(secondRules) != 1 || secondRules[0] != "||second.example^" {
+		t.Fatalf("first=%v second=%v", firstRules, secondRules)
+	}
+	if firstStats.Duplicates != 0 || secondStats.Duplicates != 1 {
+		t.Fatalf("firstStats=%+v secondStats=%+v", firstStats, secondStats)
+	}
+}
+
 func TestOptimizeKeepsDifferentMetadataScopes(t *testing.T) {
 	rules := []string{
 		"||scope.example^",
@@ -180,6 +241,35 @@ func TestOptimizeDeduplicatesAfterThirdPartyGuard(t *testing.T) {
 	}
 }
 
+func TestOptimizeThirdPartyGuardMatchesChromiumRule(t *testing.T) {
+	rules := []string{
+		"||bare.example^",
+		"||ended.example|",
+		"||path.example/track",
+		"||already.example^$third-party",
+		"@@||allow.example^",
+	}
+	final, duplicates := Optimize(rules)
+	if duplicates != 0 || len(final) != len(rules) {
+		t.Fatalf("final=%v duplicates=%d", final, duplicates)
+	}
+	present := map[string]bool{}
+	for _, rule := range final {
+		present[rule] = true
+	}
+	for _, want := range []string{
+		"||bare.example^$third-party",
+		"||ended.example|",
+		"||path.example/track",
+		"||already.example^$third-party",
+		"@@||allow.example^",
+	} {
+		if !present[want] {
+			t.Fatalf("missing %q in %v", want, final)
+		}
+	}
+}
+
 func TestDomainListRejectsConflictingScope(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
@@ -272,7 +362,6 @@ func TestElementTypeModifiers(t *testing.T) {
 		"||sorted.example^$font,xmlhttprequest",
 		"||neg.example^$~image,~stylesheet",
 		"||withtp.example^$object-subrequest,third-party,domain=foo.example",
-		"||popup.example^$popup",
 	} {
 		if !present[want] {
 			t.Fatalf("missing %q in %v", want, rules)
@@ -288,8 +377,8 @@ func TestElementTypeModifiers(t *testing.T) {
 			}
 		}
 	}
-	if got := st.ByReason["unsupported-modifier"]; got != 2 {
-		t.Fatalf("unsupported-modifier=%d, want 2 (mixed-polarity + duplicate); reasons=%v", got, st.ByReason)
+	if got := st.ByReason["unsupported-modifier"]; got != 3 {
+		t.Fatalf("unsupported-modifier=%d, want 3 (mixed-polarity + duplicate + popup); reasons=%v", got, st.ByReason)
 	}
 }
 
@@ -298,10 +387,12 @@ func TestActivationTypeModifiersAreExceptionOnly(t *testing.T) {
 	in := filepath.Join(dir, "in.txt")
 	rej := filepath.Join(dir, "rej.txt")
 	input := strings.Join([]string{
-		"@@||safe.example^$document,elemhide",
-		"||blocked.example^$document",          // not an exception rule: rejected
+		"@@||safe.example^$document,genericblock",
+		"||blocked.example^$document",           // not an exception rule: rejected
 		"@@||neg.example^$~document",            // activation types aren't tristate: rejected
-		"@@||both.example^$script,generichide", // can't mix element and activation types
+		"@@||both.example^$script,genericblock", // can't mix element and activation types
+		"@@||css.example^$elemhide",             // stripped by the legacy engine: rejected
+		"@@||generic.css^$generichide",          // stripped by the legacy engine: rejected
 	}, "\n")
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
@@ -314,14 +405,14 @@ func TestActivationTypeModifiersAreExceptionOnly(t *testing.T) {
 	for _, r := range rules {
 		present[r] = true
 	}
-	if !present["@@||safe.example^$document,elemhide"] {
+	if !present["@@||safe.example^$document,genericblock"] {
 		t.Fatalf("missing accepted activation-type exception rule in %v", rules)
 	}
 	if len(rules) != 1 {
 		t.Fatalf("rules=%v, want exactly 1 accepted rule", rules)
 	}
-	if got := st.ByReason["unsupported-modifier"]; got != 3 {
-		t.Fatalf("unsupported-modifier=%d, want 3; reasons=%v", got, st.ByReason)
+	if got := st.ByReason["unsupported-modifier"]; got != 5 {
+		t.Fatalf("unsupported-modifier=%d, want 5; reasons=%v", got, st.ByReason)
 	}
 }
 
@@ -434,5 +525,27 @@ func TestHostsEntriesRejectTrailingFields(t *testing.T) {
 	}
 	if len(rules) != 1 || st.ByReason["invalid-host-entry"] != 1 {
 		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
+	}
+}
+func TestReadFileToSinkStreamsRules(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	if err := os.WriteFile(in, []byte("||a.example^\n||b.example/path\n||a.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	st, err := (Builder{}).ReadFileToSink(in, rej, func(rule string) error {
+		got = append(got, rule)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if st.Read != 3 || st.Rejected != 0 || st.Duplicates != 0 {
+		t.Fatalf("unexpected stats: %+v", st)
+	}
+	if len(got) != 3 {
+		t.Fatalf("got=%v, want 3 streamed rules", got)
 	}
 }

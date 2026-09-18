@@ -2,6 +2,7 @@ package filter
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -11,37 +12,72 @@ import (
 )
 
 type Stats struct {
-	Read     int
-	Rejected int
-	ByReason map[string]int
+	Read       int
+	Rejected   int
+	Duplicates int
+	ByReason   map[string]int
 }
 
 type Builder struct{}
 
-func (Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
+type RuleSink func(string) error
+
+func (b Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
+	return b.ReadFileWithSeen(input, rejectedPath, nil)
+}
+
+// ReadFileWithSeen behaves like ReadFile, but uses globalSeen to deduplicate
+// normalized rules across multiple input files when non-nil.
+func (b Builder) ReadFileWithSeen(input, rejectedPath string, globalSeen map[string]struct{}) ([]string, Stats, error) {
+	rules := make([]string, 0, 4096)
+	seen := globalSeen
+	if seen == nil {
+		seen = make(map[string]struct{}, 4096)
+	}
+	stats, err := b.ReadFileToSink(input, rejectedPath, func(rule string) error {
+		if _, exists := seen[rule]; exists {
+			return errDuplicateRule
+		}
+		seen[rule] = struct{}{}
+		rules = append(rules, rule)
+		return nil
+	})
+	if err != nil {
+		return nil, stats, err
+	}
+	return rules, stats, nil
+}
+
+var errDuplicateRule = fmt.Errorf("duplicate rule")
+
+// ReadFileToSink parses and normalizes one input file without retaining its
+// accepted rules. The sink owns downstream storage, which allows the
+// production build to use an external sorter instead of a process-wide map
+// and full in-memory rule slice.
+func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
+	if sink == nil {
+		return Stats{}, fmt.Errorf("rule sink is nil")
+	}
 	in, err := os.Open(input)
 	if err != nil {
-		return nil, Stats{}, fmt.Errorf("open %s: %w", input, err)
+		return Stats{}, fmt.Errorf("open %s: %w", input, err)
 	}
 	defer in.Close()
 
 	if err := os.MkdirAll(filepath.Dir(rejectedPath), 0o755); err != nil {
-		return nil, Stats{}, fmt.Errorf("create rejected report directory: %w", err)
+		return Stats{}, fmt.Errorf("create rejected report directory: %w", err)
 	}
 	rej, err := os.Create(rejectedPath)
 	if err != nil {
-		return nil, Stats{}, fmt.Errorf("create rejected report: %w", err)
+		return Stats{}, fmt.Errorf("create rejected report: %w", err)
 	}
 	defer rej.Close()
 
 	if _, err := fmt.Fprintln(rej, "# line\treason\trule"); err != nil {
-		return nil, Stats{}, fmt.Errorf("write rejected report header: %w", err)
+		return Stats{}, fmt.Errorf("write rejected report header: %w", err)
 	}
 
-	rules := make([]string, 0, 4096)
 	stats := Stats{ByReason: make(map[string]int)}
-	seen := make(map[string]struct{}, 4096)
-
 	sc := bufio.NewScanner(in)
 	sc.Buffer(make([]byte, 64<<10), 2<<20)
 	for sc.Scan() {
@@ -57,30 +93,32 @@ func (Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
 			stats.Rejected++
 			stats.ByReason[reason]++
 			if _, err := fmt.Fprintf(rej, "%d\t%s\t%s\n", stats.Read, reason, sanitizeReport(rawLine)); err != nil {
-				return nil, stats, fmt.Errorf("write rejected report: %w", err)
+				return stats, fmt.Errorf("write rejected report: %w", err)
 			}
 			continue
 		}
-		if _, exists := seen[rule]; exists {
-			continue
+		if err := sink(rule); err != nil {
+			if errors.Is(err, errDuplicateRule) {
+				stats.Duplicates++
+				continue
+			}
+			return stats, fmt.Errorf("store normalized rule from %s: %w", input, err)
 		}
-		seen[rule] = struct{}{}
-		rules = append(rules, rule)
 	}
 	if err := sc.Err(); err != nil {
-		return nil, stats, fmt.Errorf("scan %s: %w", input, err)
+		return stats, fmt.Errorf("scan %s: %w", input, err)
 	}
 	if err := rej.Sync(); err != nil {
-		return nil, stats, fmt.Errorf("sync rejected report: %w", err)
+		return stats, fmt.Errorf("sync rejected report: %w", err)
 	}
-	return rules, stats, nil
+	return stats, nil
 }
 
 // Optimize performs only transformations that are provably semantics-preserving
 // for the legacy Chromium subresource_filter syntax:
 //   - exact duplicate removal;
 //   - canonical ordering; and
-//   - Chromium's required third-party guard on bare ||host^ / ||host| blocks.
+//   - Chromium's required third-party guard on bare ||host^ blocks.
 //
 // It deliberately does not perform path/domain/modifier subsumption because
 // those rules can differ in first-party/third-party or initiator-domain scope.
@@ -91,18 +129,7 @@ func Optimize(rules []string) ([]string, int) {
 		if rule == "" {
 			continue
 		}
-		// Apply the third-party guard before deduplication. Different
-		// source lists frequently ship both a bare "||host^" and an
-		// already-"||host^$third-party" rule for the same host; guarding
-		// first means both collapse onto the same canonical string and are
-		// deduplicated, instead of surviving as distinct pre-guard strings
-		// that would otherwise both transform into an undetected duplicate
-		// output line.
-		if strings.HasPrefix(rule, "||") {
-			if _, suffix, ok := splitAnchored(rule[2:]); ok && (suffix == "^" || suffix == "|") {
-				rule += "$third-party"
-			}
-		}
+		rule = optimizeRule(rule)
 		if _, exists := set[rule]; exists {
 			duplicateCount++
 			continue
@@ -117,6 +144,21 @@ func Optimize(rules []string) ([]string, int) {
 
 	sort.Strings(out)
 	return out, duplicateCount
+}
+
+func optimizeRule(rule string) string {
+	if isBareDomainBlock(rule) {
+		return rule + "$third-party"
+	}
+	return rule
+}
+
+func isBareDomainBlock(rule string) bool {
+	if !strings.HasPrefix(rule, "||") || len(rule) <= 3 || !strings.HasSuffix(rule, "^") {
+		return false
+	}
+	host := rule[2 : len(rule)-1]
+	return !strings.ContainsAny(host, "/?#^|$") && validDomain(host)
 }
 
 func Write(path string, rules []string) error {
@@ -239,14 +281,10 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 			return "", "", false
 		}
 		switch rest {
-		case "", "^", "|":
-			// rest == "" is a bare "||host" with no terminator at all. Real
-			// filter-list generators always terminate a host-only rule with
-			// "^" (or "|"), so this is folded into the same "||host^" output
-			// as an explicit terminator rather than emitted as an untermin-
-			// ated pattern, which would rely on implicit substring matching
-			// past the host and is not a form any supported source emits.
-			return "||" + strings.ToLower(host) + "^" + modSuffix, "", true
+		case "^", "|":
+			return "||" + strings.ToLower(host) + rest + modSuffix, "", true
+		case "":
+			return "", "unterminated-host-rule", false
 		}
 		if !validPath(rest) {
 			return "", "", false
@@ -295,16 +333,16 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 var elementTypeOptions = map[string]struct{}{
 	"script": {}, "image": {}, "stylesheet": {}, "object": {},
 	"xmlhttprequest": {}, "object-subrequest": {}, "subdocument": {},
-	"ping": {}, "media": {}, "font": {}, "websocket": {}, "other": {}, "popup": {},
+	"ping": {}, "media": {}, "font": {}, "websocket": {}, "other": {},
 }
 
 // activationTypeOptions are the ActivationType keywords, which the upstream
 // parser marks whitelist-only (FLAG_IS_WHITELIST_ONLY) and non-tristate: they
-// may only appear on "@@" exception rules and never negated. Each one simply
+// may only appear on "@@" exception rules and never negated. CSS-related activation types are intentionally omitted because the legacy engine strips them. Each one simply
 // ORs a bit into the rule, independent of every other option, so any subset
 // of them can be safely reordered/sorted.
 var activationTypeOptions = map[string]struct{}{
-	"document": {}, "elemhide": {}, "generichide": {}, "genericblock": {},
+	"document": {}, "genericblock": {},
 }
 
 // parseModifiers accepts only modifiers supported by the legacy Chromium
@@ -531,14 +569,6 @@ func validDomain(s string) bool {
 		}
 	}
 	return !allNumeric
-}
-
-func splitAnchored(x string) (string, string, bool) {
-	pos := strings.IndexAny(x, "/?#^|")
-	if pos < 0 {
-		return strings.ToLower(x), "", validDomain(x)
-	}
-	return strings.ToLower(x[:pos]), x[pos:], validDomain(x[:pos])
 }
 
 func sanitizeReport(s string) string {
