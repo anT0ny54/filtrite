@@ -80,15 +80,7 @@ lists/german.txt    -> filters/german.txt  , dist/german.dat
 lists/minimal.txt   -> filters/minimal.txt , dist/minimal.dat
 ```
 
-Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project, which is what makes fork discovery via filterlists.010.one (see next section) possible.
-
-## 🔎 Publishing to filterlists.010.one
-
-[filterlists.010.one](https://filterlists.010.one/) is a search UI, built by [filtrite-lists](https://github.com/xarantolus/filtrite-lists), that walks the GitHub fork network of [xarantolus/filtrite](https://github.com/xarantolus/filtrite) once a day and, for every fork it finds, matches that fork's `lists/*.txt` manifest names against the release assets of its latest GitHub Release. A fork shows up there once **all** of the following are true:
-
-1. **The repository is an actual GitHub fork of `xarantolus/filtrite`** (created with GitHub's "Fork" button, so it appears in that repository's fork network) — not a copy pushed to a brand-new repository. This tool can't create or verify that relationship for you; it's a one-time decision made when the repository is created on GitHub.
-2. **`lists/*.txt` manifests exist with the names you want listed**, which `build.sh` now builds automatically into matching `dist/<name>.dat` files (see "Multiple named lists" above) — this part is handled.
-3. **The latest GitHub Release publishes one asset per list, named `<name>.dat`.** This repository's `.github/workflows/build.yml` already publishes `dist/*.dat`, so every manifest under `lists/*.txt` is released automatically under its matching name.
+Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project.
 
 Scheduled GitHub Actions workflows are disabled after 60 days without a commit to the repository, so an inactive fork eventually stops publishing new releases and drops out of search results until something is pushed again.
 
