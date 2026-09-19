@@ -8,77 +8,25 @@ cd "$ROOT"
 rm -rf build filters dist filters.txt
 mkdir -p build build/work build/source-cache
 
-: "${CONVERTER_TAG:=2026-07-24-05-28}"
-: "${CONVERTER_URL:=https://github.com/xarantolus/subresource_filter_tools/releases/download/${CONVERTER_TAG}/subresource_filter_tools_linux-x64.zip}"
-: "${CONVERTER_SHA256:=7dd1121c197cffaa8d6a83e26c668c43dbf812299dd959a9611562237a69b493}"
-
-CONVERTER_LOCK="deps/ruleset_converter.lock"
+CONVERTER_URL="${CONVERTER_URL:-https://github.com/uazo/cromite/releases/latest/download/ruleset_converter}"
 CONVERTER_PATH="deps/ruleset_converter"
 
-# The release tag, URL, and archive SHA-256 form the content pin. The lock
-# additionally records the extracted binary hash so a changed or replaced
-# local converter is never silently reused.
-lock_tag=""
-lock_url=""
-lock_archive_sha256=""
-lock_binary_sha256=""
-if [[ -f "$CONVERTER_LOCK" ]]; then
-  while IFS='=' read -r key value; do
-    case "$key" in
-      converter_tag)  lock_tag="$value" ;;
-      converter_url)  lock_url="$value" ;;
-      archive_sha256) lock_archive_sha256="$value" ;;
-      binary_sha256)  lock_binary_sha256="$value" ;;
-    esac
-  done < "$CONVERTER_LOCK"
-fi
-
+# Cromite publishes the converter as a standalone Linux binary at its
+# rolling latest-release URL. Do not keep a tag, archive checksum, or lock
+# file here: a fresh build intentionally retrieves the currently published
+# converter. Download to a temporary file and replace the local copy only
+# after a successful transfer.
+command -v curl >/dev/null || { echo "ERROR: curl is required" >&2; exit 1; }
 mkdir -p deps
-if [[ -x "$CONVERTER_PATH" ]]; then
-  reusable=0
-  if [[ "$lock_tag" == "$CONVERTER_TAG" && "$lock_url" == "$CONVERTER_URL" && "$lock_archive_sha256" == "$CONVERTER_SHA256" && "$lock_binary_sha256" =~ ^[[:xdigit:]]{64}$ ]]; then
-    command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 1; }
-    actual_binary_sha256="$(sha256sum "$CONVERTER_PATH" | awk '{print $1}')"
-    if [[ "$actual_binary_sha256" == "$lock_binary_sha256" ]]; then
-      reusable=1
-      echo "Using pinned ruleset_converter $CONVERTER_TAG ($actual_binary_sha256)"
-    fi
-  fi
-  if (( ! reusable )); then
-    echo "Refreshing ruleset_converter because its pin or verified hash changed" >&2
-    rm -f "$CONVERTER_PATH" "$CONVERTER_LOCK"
-  fi
-fi
-
-if [[ ! -x "$CONVERTER_PATH" ]]; then
-  command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
-  command -v unzip >/dev/null || { echo "unzip is required" >&2; exit 1; }
-  command -v sha256sum >/dev/null || { echo "sha256sum is required" >&2; exit 1; }
-  [[ "$CONVERTER_SHA256" =~ ^[[:xdigit:]]{64}$ ]] || {
-    echo "ERROR: CONVERTER_SHA256 must contain the 64-hex SHA-256 of $CONVERTER_URL" >&2
-    exit 1
-  }
-  tmp="$(mktemp)"
-  extract_dir="$(mktemp -d)"
-  trap 'rm -f "$tmp"; rm -rf "$extract_dir"' EXIT
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 4 --retry-delay 2 \
-    --connect-timeout 20 --max-time 180 "$CONVERTER_URL" --output "$tmp"
-  printf '%s  %s\n' "$CONVERTER_SHA256" "$tmp" | sha256sum --check --status - \
-    || { echo "ERROR: converter archive checksum mismatch" >&2; exit 1; }
-  unzip -oq "$tmp" 'ruleset_converter' -d "$extract_dir"
-  chmod +x "$extract_dir/ruleset_converter"
-  binary_sha256="$(sha256sum "$extract_dir/ruleset_converter" | awk '{print $1}')"
-  mv -f "$extract_dir/ruleset_converter" "$CONVERTER_PATH"
-  tmp_lock="${CONVERTER_LOCK}.tmp"
-  {
-    printf 'converter_tag=%s\n' "$CONVERTER_TAG"
-    printf 'converter_url=%s\n' "$CONVERTER_URL"
-    printf 'archive_sha256=%s\n' "$CONVERTER_SHA256"
-    printf 'binary_sha256=%s\n' "$binary_sha256"
-  } > "$tmp_lock"
-  mv -f "$tmp_lock" "$CONVERTER_LOCK"
-fi
-[[ -x "$CONVERTER_PATH" ]] || { echo "ERROR: ruleset_converter not installed" >&2; exit 1; }
+tmp_converter="$(mktemp "${CONVERTER_PATH}.tmp.XXXXXX")"
+trap 'rm -f "$tmp_converter"' EXIT
+curl --fail --location --proto '=https' --tlsv1.2 --retry 4 --retry-delay 2 \
+  --connect-timeout 20 --max-time 180 "$CONVERTER_URL" --output "$tmp_converter"
+test -s "$tmp_converter" || { echo "ERROR: downloaded ruleset_converter is empty" >&2; exit 1; }
+chmod +x "$tmp_converter"
+mv -f "$tmp_converter" "$CONVERTER_PATH"
+trap - EXIT
+[[ -x "$CONVERTER_PATH" ]] || { echo "ERROR: ruleset_converter is not executable" >&2; exit 1; }
 
 go build -trimpath -ldflags='-s -w' -o build/legacy-filter-builder ./cmd/legacy-filter-builder
 go build -trimpath -ldflags='-s -w' -o build/filtrite ./cmd/filtrite

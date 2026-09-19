@@ -89,8 +89,8 @@ Scheduled GitHub Actions workflows are disabled after 60 days without a commit t
 Requirements:
 
 - Go 1.23+ for this source tree.
-- `curl`, `unzip`, and `sha256sum` when `deps/ruleset_converter` is not already present.
-- A Linux-compatible Chromium `ruleset_converter` binary.
+- `curl`.
+- A Linux-compatible `ruleset_converter` binary is downloaded automatically from Cromite's latest release during each `build.sh` run.
 
 Run:
 
@@ -123,13 +123,13 @@ For direct builder use, partial source failures are disabled by default. Use `--
 
 `build.sh` does not pass `--allow-partial`, so release builds remain complete-or-fail.
 
-The converter archive is pinned by tag, URL, and SHA-256 in `build.sh`. The current pinned archive is verified automatically on first install. When changing the converter tag or URL, also provide the SHA-256 of that exact archive:
+`build.sh` downloads the standalone `ruleset_converter` binary from Cromite's rolling latest-release URL:
 
-```sh
-CONVERTER_SHA256=<64-hex-sha256> ./build.sh
+```text
+https://github.com/uazo/cromite/releases/latest/download/ruleset_converter
 ```
 
-The verified converter is recorded in `deps/ruleset_converter.lock`, including the archive and extracted-binary hashes. Later builds reuse it only when the tag and URL match and the local binary hash still matches the lock. Changing the converter pin automatically requires a new checksum and download.
+The converter is intentionally not pinned or checksum-locked; each build retrieves the version currently published at that URL. This keeps the build aligned with the latest Cromite converter, while also meaning reproducible builds require you to preserve a known converter binary separately.
 
 `build.sh` enforces a **20 MiB default maximum** for every generated `dist/<name>.dat` ruleset and fails the build immediately if a ruleset exceeds it. Override the ceiling explicitly with `MAX_RULESET_BYTES=<bytes>` when a different target limit is required.
 
@@ -159,7 +159,7 @@ For Cromite, use this output only when the specific build/configuration you are 
 
 ## Create a custom build
 
-1. Fork the repository (use GitHub's "Fork" button if you want the result to show up on filterlists.010.one — see "Publishing to filterlists.010.one" above).
+1. Fork the repository if you want your own independently maintained build.
 2. Edit `lists/adblock.txt` to add/remove source URLs, and/or add another `lists/<name>.txt` manifest for a separate named list.
 3. Edit `custom-rules.txt` for local legacy-compatible network rules; it's applied to every list.
 4. Run the test suite (`go test ./...`).
@@ -177,21 +177,6 @@ The GitHub Actions workflow runs tests before building and validates every gener
 ## 📄 License
 
 See [`LICENSE`](LICENSE).
-
-## 🔗 Other projects by the maintainer
-
-These are unrelated to the projects above but are run by the same maintainer.
-
-**My Free DNS** — DNS-over-HTTPS resolvers using HaGeZi Blocklists Multi Pro + TIF:
-
-| Service | DNS-over-HTTPS URL |
-| --- | --- |
-| Multi Pro + TIF (Recommended) | `https://freedns.koyeb.app/dns-query` |
-| Multi Pro + TIF (Recommended) | `https://dns-pi.vercel.app/api/doh/dns-query` |
-| Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
-| Multi Pro + TIF (Recommended, but will sleep if not used within 15 minutes) | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
-
-**Bandwidth Hero Server** — a lightweight image proxy that fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use: https://bhserv.netlify.app/
 
 ## 💜 Support this project
 

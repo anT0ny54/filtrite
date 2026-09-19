@@ -4,6 +4,9 @@ All notable changes to this project are documented here.
 
 ## [Unreleased]
 
+### Changed
+- Replaced the pinned third-party converter archive workflow with Cromite's rolling latest `ruleset_converter` binary URL. `build.sh` no longer uses `CONVERTER_LOCK`, `CONVERTER_SHA256`, a converter tag, or a converter checksum lock file; each build retrieves the converter currently published by Cromite.
+
 ### Fixed
 - Fixed the exact `MaxTotalBytes` boundary case: a source whose final permitted byte is also the global budget boundary now terminates cleanly at EOF instead of being reported as oversized.
 - Source-download failures are release-fatal by default, preventing accidental publication of a partially populated ruleset. Intentional partial builds remain available with `--allow-partial`; cancellation and timeouts are always fatal.
@@ -28,4 +31,3 @@ All notable changes to this project are documented here.
 ### CI / maintenance notes
 - The release workflow now watches all `lists/*.txt` manifests and publishes all matching `dist/*.dat` files.
 - The generated text filters remain useful as auditable intermediate artifacts, but they are no longer duplicated to a root-level `filters.txt` release asset.
-- The pinned converter archive and binary hash checks remain unchanged.
