@@ -80,6 +80,9 @@ func Convert(ctx context.Context, o Options) error {
 		if ctx.Err() != nil {
 			return fmt.Errorf("converter canceled: %w", ctx.Err())
 		}
+		if o.Log != "" {
+			return fmt.Errorf("converter failed (see %s): %w", o.Log, runErr)
+		}
 		return fmt.Errorf("converter failed: %w", runErr)
 	}
 	if closeErr != nil {
@@ -91,6 +94,10 @@ func Convert(ctx context.Context, o Options) error {
 	}
 	if info.Size() == 0 {
 		return fmt.Errorf("converter created empty output")
+	}
+	// CreateTemp uses 0600; published artifacts should be world-readable.
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return fmt.Errorf("set output permissions: %w", err)
 	}
 	if err := os.Rename(tmpPath, o.Output); err != nil {
 		return fmt.Errorf("replace output %s: %w", o.Output, err)
