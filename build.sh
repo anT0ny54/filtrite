@@ -3,8 +3,7 @@ set -Eeuo pipefail
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
-: "${CONVERTER_TAG:=2026-07-24-05-28}"
-: "${CONVERTER_URL:=https://github.com/xarantolus/subresource_filter_tools/releases/download/${CONVERTER_TAG}/subresource_filter_tools_linux-x64.zip}"
+: "${CONVERTER_URL:=https://github.com/xarantolus/subresource_filter_tools/releases/download/latest/subresource_filter_tools_linux-x64.zip}"
 
 mkdir -p deps dist build
 if [[ ! -x deps/ruleset_converter ]]; then
