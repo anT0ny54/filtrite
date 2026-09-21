@@ -11,22 +11,42 @@ mkdir -p build build/work build/source-cache
 CONVERTER_URL="${CONVERTER_URL:-https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip}"
 CONVERTER_PATH="deps/ruleset_converter"
 
-# Cromite publishes the converter as a standalone Linux binary at its
-# rolling latest-release URL. Do not keep a tag, archive checksum, or lock
-# file here: a fresh build intentionally retrieves the currently published
-# converter. Download to a temporary file and replace the local copy only
-# after a successful transfer.
+# Cromite publishes the converter as a standalone Linux binary in a release zip.
+# The archive must be unpacked before the binary can be executed; downloading the
+# zip directly and chmod'ing it produces the exec format error seen in CI.
 command -v curl >/dev/null || { echo "ERROR: curl is required" >&2; exit 1; }
+command -v unzip >/dev/null || { echo "ERROR: unzip is required" >&2; exit 1; }
 mkdir -p deps
-tmp_converter="$(mktemp "${CONVERTER_PATH}.tmp.XXXXXX")"
-trap 'rm -f "$tmp_converter"' EXIT
+
+tmp_archive="$(mktemp "${CONVERTER_PATH}.zip.XXXXXX")"
+tmp_extract="$(mktemp -d "${CONVERTER_PATH}.extract.XXXXXX")"
+trap 'rm -f "$tmp_archive"; rm -rf "$tmp_extract"' EXIT
+
 curl --fail --location --proto '=https' --tlsv1.2 --retry 4 --retry-delay 2 \
-  --connect-timeout 20 --max-time 180 "$CONVERTER_URL" --output "$tmp_converter"
-test -s "$tmp_converter" || { echo "ERROR: downloaded ruleset_converter is empty" >&2; exit 1; }
-chmod +x "$tmp_converter"
-mv -f "$tmp_converter" "$CONVERTER_PATH"
+  --connect-timeout 20 --max-time 180 "$CONVERTER_URL" --output "$tmp_archive"
+test -s "$tmp_archive" || { echo "ERROR: downloaded ruleset_converter archive is empty" >&2; exit 1; }
+
+if [[ "$CONVERTER_URL" == *.zip ]]; then
+  unzip -q "$tmp_archive" -d "$tmp_extract"
+  candidate="$(find "$tmp_extract" -type f \( -name 'ruleset_converter' -o -name 'subresource_filter_tools' \) | head -n 1)"
+  if [[ -z "$candidate" ]]; then
+    echo "ERROR: ruleset_converter binary was not found in the downloaded archive" >&2
+    unzip -l "$tmp_archive" >&2 || true
+    exit 1
+  fi
+  mv -f "$candidate" "$CONVERTER_PATH"
+else
+  mv -f "$tmp_archive" "$CONVERTER_PATH"
+fi
+
+chmod +x "$CONVERTER_PATH"
 trap - EXIT
 [[ -x "$CONVERTER_PATH" ]] || { echo "ERROR: ruleset_converter is not executable" >&2; exit 1; }
+file "$CONVERTER_PATH" | grep -Eq 'ELF .* (64-bit|32-bit)' || {
+  echo "ERROR: ruleset_converter is not a native Linux executable" >&2
+  file "$CONVERTER_PATH" >&2 || true
+  exit 1
+}
 
 go build -trimpath -ldflags='-s -w' -o build/legacy-filter-builder ./cmd/legacy-filter-builder
 go build -trimpath -ldflags='-s -w' -o build/filtrite ./cmd/filtrite
