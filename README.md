@@ -89,8 +89,8 @@ Scheduled GitHub Actions workflows are disabled after 60 days without a commit t
 Requirements:
 
 - Go 1.23+ for this source tree.
-- `curl`.
-- A Linux-compatible `ruleset_converter` binary is downloaded automatically from Cromite's latest release during each `build.sh` run.
+- `curl` and `unzip`.
+- A Linux-compatible `ruleset_converter` binary is downloaded automatically on the first `build.sh` run and cached in `deps/`.
 
 Run:
 
@@ -123,15 +123,15 @@ For direct builder use, partial source failures are disabled by default. Use `--
 
 `build.sh` does not pass `--allow-partial`, so release builds remain complete-or-fail.
 
-`build.sh` downloads the standalone `ruleset_converter` binary from Cromite's rolling latest-release URL:
+`build.sh` downloads the prebuilt `ruleset_converter` (Chromium `subresource_filter_tools`) from the rolling latest-release archive below and caches it as `deps/ruleset_converter`; delete that file to force a refresh:
 
 ```text
-https://github.com/uazo/cromite/releases/latest/download/ruleset_converter
+https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip
 ```
 
-The converter is intentionally not pinned or checksum-locked; each build retrieves the version currently published at that URL. This keeps the build aligned with the latest Cromite converter, while also meaning reproducible builds require you to preserve a known converter binary separately.
+Override the location with `CONVERTER_URL=<https url>`, and pin the archive with `CONVERTER_SHA256=<hex>`; when set, a checksum mismatch aborts the build. Without a pin, each fresh download uses whatever is currently published, so reproducible builds require preserving a known converter binary separately.
 
-`build.sh` enforces a **20 MiB default maximum** for every generated `dist/<name>.dat` ruleset and fails the build immediately if a ruleset exceeds it. Override the ceiling explicitly with `MAX_RULESET_BYTES=<bytes>` when a different target limit is required.
+`build.sh` checks every generated `dist/<name>.dat` against a **20 MiB default limit** and prints a warning (without failing the build) when it is exceeded. Override the ceiling with `MAX_RULESET_BYTES=<bytes>`.
 
 ## ✅ Validation
 
