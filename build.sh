@@ -8,7 +8,7 @@ cd "$ROOT"
 rm -rf build filters dist filters.txt
 mkdir -p build build/work build/source-cache
 
-CONVERTER_URL="${CONVERTER_URL:-https://github.com/uazo/cromite/releases/latest/download/ruleset_converter}"
+CONVERTER_URL="${CONVERTER_URL:-https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip}"
 CONVERTER_PATH="deps/ruleset_converter"
 
 # Cromite publishes the converter as a standalone Linux binary at its
