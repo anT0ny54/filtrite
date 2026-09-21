@@ -357,8 +357,8 @@ func htmlError(path string) bool {
 	}
 	defer f.Close()
 	buf := make([]byte, 4096)
-	n, _ := f.Read(buf)
-	s := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(strings.ToLower(string(buf[:n])), "\ufeff"), "\xef\xbb\xbf"))
+	n, _ := io.ReadFull(f, buf) // short files return ErrUnexpectedEOF with n valid
+	s := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(string(buf[:n])), "\ufeff"))
 	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body")
 }
 
@@ -377,6 +377,10 @@ func retryable(err error) bool {
 	var s *statusError
 	if errors.As(err, &s) {
 		return s.Code == 408 || s.Code == 429 || s.Code == 500 || s.Code == 502 || s.Code == 503 || s.Code == 504
+	}
+	// A body cut off mid-transfer is a transient network failure.
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
 	}
 	var netErr net.Error
 	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
