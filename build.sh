@@ -46,7 +46,10 @@ trap - EXIT
 file_output="$(file "$CONVERTER_PATH" 2>&1 || true)"
 printf '%s\n' "$file_output"
 
-grep -Eq 'ELF .* (64-bit|32-bit).*executable' <<<"$file_output" || {
+# Some release builds are PIE executables, which are still native Linux ELF
+# binaries. Match the Linux executable formats we support instead of requiring
+# the older non-PIE wording from `file`.
+grep -Eq 'ELF .* (64-bit|32-bit).* (pie )?executable' <<<"$file_output" || {
   echo "ERROR: ruleset_converter is not a native Linux executable" >&2
   printf '%s\n' "$file_output" >&2 || true
   exit 1
