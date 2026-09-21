@@ -103,6 +103,7 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	}
 	tmpPath := tmp.Name()
 	defer os.Remove(tmpPath)
+	defer tmp.Close() // no-op after the explicit Close below; covers early error returns
 
 	files := make([]*os.File, len(s.chunks))
 	readers := make([]*bufio.Reader, len(s.chunks))
@@ -140,7 +141,7 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 		if haveLast && item.line == last {
 			result.Duplicates++
 		} else {
-			if _, err := fmt.Fprintln(w, item.line); err != nil {
+			if err := writeLine(w, item.line); err != nil {
 				return SortResult{}, fmt.Errorf("write generated filter list: %w", err)
 			}
 			result.Rules++
@@ -167,6 +168,10 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	}
 	if err := tmp.Close(); err != nil {
 		return SortResult{}, fmt.Errorf("close generated filter list: %w", err)
+	}
+	// CreateTemp uses 0600; published artifacts should be world-readable.
+	if err := os.Chmod(tmpPath, 0o644); err != nil {
+		return SortResult{}, fmt.Errorf("set generated filter list permissions: %w", err)
 	}
 	if err := os.Rename(tmpPath, output); err != nil {
 		return SortResult{}, fmt.Errorf("replace %s: %w", output, err)
@@ -196,7 +201,7 @@ func (s *ExternalSorter) flushChunk() error {
 	}
 	w := bufio.NewWriterSize(f, 1<<20)
 	for _, rule := range s.rules {
-		if _, err := fmt.Fprintln(w, rule); err != nil {
+		if err := writeLine(w, rule); err != nil {
 			_ = f.Close()
 			_ = os.Remove(path)
 			return fmt.Errorf("write sort chunk: %w", err)
@@ -234,6 +239,13 @@ func (h *mergeHeap) Pop() interface{} {
 	item := old[n-1]
 	*h = old[:n-1]
 	return item
+}
+
+func writeLine(w *bufio.Writer, s string) error {
+	if _, err := w.WriteString(s); err != nil {
+		return err
+	}
+	return w.WriteByte('\n')
 }
 
 func nextChunkLine(r *bufio.Reader) (string, error) {

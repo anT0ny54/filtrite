@@ -161,42 +161,6 @@ func isBareDomainBlock(rule string) bool {
 	return !strings.ContainsAny(host, "/?#^|$") && validDomain(host)
 }
 
-func Write(path string, rules []string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("create output directory: %w", err)
-	}
-	tmp, err := os.CreateTemp(dir, ".filters.tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	w := bufio.NewWriterSize(tmp, 1<<20)
-	for _, rule := range rules {
-		if _, err := fmt.Fprintln(w, rule); err != nil {
-			_ = tmp.Close()
-			return err
-		}
-	}
-	if err := w.Flush(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		_ = tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmpPath, path); err != nil {
-		return fmt.Errorf("replace %s: %w", path, err)
-	}
-	return nil
-}
-
 func normalize(line string) (string, string, bool) {
 	// Hosts-file records legitimately contain a separator; only accept the
 	// canonical address + exactly one hostname so extra fields are not ignored.
