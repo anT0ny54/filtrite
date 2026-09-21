@@ -42,9 +42,21 @@ fi
 chmod +x "$CONVERTER_PATH"
 trap - EXIT
 [[ -x "$CONVERTER_PATH" ]] || { echo "ERROR: ruleset_converter is not executable" >&2; exit 1; }
-file "$CONVERTER_PATH" | grep -Eq 'ELF .* (64-bit|32-bit)' || {
+
+file_output="$(file "$CONVERTER_PATH" 2>&1 || true)"
+printf '%s\n' "$file_output"
+
+grep -Eq 'ELF .* (64-bit|32-bit).*executable' <<<"$file_output" || {
   echo "ERROR: ruleset_converter is not a native Linux executable" >&2
-  file "$CONVERTER_PATH" >&2 || true
+  printf '%s\n' "$file_output" >&2 || true
+  exit 1
+}
+
+# Smoke-test the converter before the rest of the build. This catches bad or
+# partially-downloaded binaries even when the file format is accepted by the
+# OS-level ELF detection logic.
+"$CONVERTER_PATH" --help >/dev/null 2>&1 || {
+  echo "ERROR: ruleset_converter is not runnable" >&2
   exit 1
 }
 
