@@ -44,15 +44,13 @@ func run(sources, custom, outFile, buildDir, cacheDir string, allowPartial bool)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	results, downloadErr := download.AllWithCache(ctx, urls, workDir, cacheDir, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
-	successful := 0
+	successful, cached := 0, 0
 	for _, result := range results {
-		if result.Err == nil {
-			successful++
+		if result.Err != nil {
+			continue
 		}
-	}
-	cached := 0
-	for _, result := range results {
-		if result.Err == nil && result.Cached {
+		successful++
+		if result.Cached {
 			cached++
 		}
 	}
@@ -84,6 +82,10 @@ func run(sources, custom, outFile, buildDir, cacheDir string, allowPartial bool)
 	}
 
 	sortDir := filepath.Join(buildDir, "sort")
+	if err := os.RemoveAll(sortDir); err != nil {
+		return err
+	}
+	defer func() { _ = os.RemoveAll(sortDir) }()
 	sorter, err := filter.NewExternalSorter(sortDir, filter.DefaultSortChunkBytes)
 	if err != nil {
 		return err
