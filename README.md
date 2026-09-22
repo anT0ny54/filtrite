@@ -190,6 +190,7 @@ These are unrelated to the filter-list compiler above but are run by the same ma
 | Multi Pro + TIF (Recommended) | `https://dns-pi.vercel.app/api/doh/dns-query` |
 | Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
 | Multi Pro + TIF (Recommended, but will sleep if not use in 15 minute) | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
+| Multi Pro + TIF (Recommended, but will sleep if not use in 15 minute) | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
 **Bandwidth Hero Server** — a lightweight image proxy that fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use: https://bhserv.netlify.app/
 
