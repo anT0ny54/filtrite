@@ -173,6 +173,13 @@ func all(ctx context.Context, urls []string, dir, cacheDir string, workers, retr
 	if len(missing) == 0 {
 		return results, nil
 	}
+	// Re-cap after subtracting cache hits: a manifest that is mostly cached
+	// (the common case on a second build.sh list) should not spin up a full
+	// worker pool sized for every URL when only a handful still need a
+	// network round trip.
+	if workers > len(missing) {
+		workers = len(missing)
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(workers)
