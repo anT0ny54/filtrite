@@ -45,77 +45,30 @@ jobs:
           chmod +x build.sh scripts/validate.sh
           ./build.sh
 
-      - name: Publish release artifact
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: legacy-${{ github.run_number }}
-          target_commitish: ${{ github.sha }}
-          name: Legacy Bromite/Cromite adblock ${{ github.run_number }}
-          body: |
-            Generated from every lists/*.txt manifest using Chromium's ruleset_converter.
-            Each manifest produces a matching dist/<name>.dat legacy unindexed ruleset.
-          files: |
-            dist/*.dat
-          make_latest: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Generate tag name
+      run: echo "TAG_NAME=$(date +%F-%H-%M)" >> $GITHUB_ENV
 
-      - name: Keep only 2 latest legacy releases
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
+    - name: Release filter lists
+      uses: softprops/action-gh-release@v2
+      with:
+        files: dist/*.dat
+        name: Automatic list generation
+        tag_name: ${{ env.TAG_NAME }}
+        body_path: release.md
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          echo "Finding legacy releases..."
+    - name: Delete older releases
+      uses: dev-drprasad/delete-older-releases@v0.3.3
+      with:
+        keep_latest: 2
+        delete_tags: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-          releases="$(
-            gh release list \
-              --limit 100 \
-              --json tagName,publishedAt,isDraft,isPrerelease \
-              --jq '
-                map(
-                  select(
-                    (.tagName | startswith("legacy-"))
-                    and (.isDraft == false)
-                    and (.isPrerelease == false)
-                  )
-                )
-                | sort_by(.publishedAt)
-                | reverse
-              '
-          )"
-
-          count="$(echo "$releases" | jq 'length')"
-
-          echo "Found $count legacy releases."
-
-          if [ "$count" -le 2 ]; then
-            echo "Nothing to delete."
-            exit 0
-          fi
-
-          echo "$releases" \
-            | jq -r '.[2:][] | .tagName' \
-            | while IFS= read -r tag; do
-                [ -z "$tag" ] && continue
-
-                echo "Deleting old release: $tag"
-
-                gh release delete "$tag" \
-                  --cleanup-tag \
-                  --yes
-              done
-
-          echo "Cleanup complete."
-
-          echo "Remaining legacy releases:"
-          gh release list \
-            --limit 10 \
-            --json tagName,publishedAt \
-            --jq '
-              map(select(.tagName | startswith("legacy-")))
-              | sort_by(.publishedAt)
-              | reverse
-              | .[]
-              | "\(.tagName) \(.publishedAt)"
-            '
+    - name: Upload log files
+      uses: actions/upload-artifact@v4
+      with:
+        name: Logs
+        path: logs/*.log
+      if: ${{ always() }}
