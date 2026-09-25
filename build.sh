@@ -1,32 +1,53 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+
 ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT"
 
 : "${CONVERTER_URL:=https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip}"
 : "${MAX_RULESET_BYTES:=$((20 * 1024 * 1024))}"
 
-command -v go >/dev/null || { echo "ERROR: go is required" >&2; exit 1; }
+command -v go >/dev/null || {
+  echo "ERROR: go is required" >&2
+  exit 1
+}
 
 # Generated output is rebuilt from scratch so removed lists/rules never linger.
 rm -rf filters dist build/work build/source-cache
 mkdir -p deps filters dist build/work build/source-cache
 
-# Release summary consumed by GitHub Actions.
+# Release description generated automatically from successful builds.
 : > build/release-summary.md
 
 if [[ ! -x deps/ruleset_converter ]]; then
-  command -v curl >/dev/null || { echo "ERROR: curl is required" >&2; exit 1; }
-  command -v unzip >/dev/null || { echo "ERROR: unzip is required" >&2; exit 1; }
+  command -v curl >/dev/null || {
+    echo "ERROR: curl is required" >&2
+    exit 1
+  }
+
+  command -v unzip >/dev/null || {
+    echo "ERROR: unzip is required" >&2
+    exit 1
+  }
 
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' EXIT
 
-  curl --fail --location --proto '=https' --tlsv1.2 --retry 4 --retry-delay 2 \
-    --connect-timeout 20 --max-time 180 "$CONVERTER_URL" --output "$tmp"
+  curl \
+    --fail \
+    --location \
+    --proto '=https' \
+    --tlsv1.2 \
+    --retry 4 \
+    --retry-delay 2 \
+    --connect-timeout 20 \
+    --max-time 180 \
+    "$CONVERTER_URL" \
+    --output "$tmp"
 
   if [[ -n "${CONVERTER_SHA256:-}" ]]; then
-    printf '%s  %s\n' "$CONVERTER_SHA256" "$tmp" | sha256sum --check --status - \
+    printf '%s  %s\n' "$CONVERTER_SHA256" "$tmp" \
+      | sha256sum --check --status - \
       || {
         echo "ERROR: converter archive checksum mismatch" >&2
         exit 1
@@ -43,11 +64,17 @@ fi
   exit 1
 }
 
-go build -trimpath -ldflags='-s -w' \
-  -o build/legacy-filter-builder ./cmd/legacy-filter-builder
+go build \
+  -trimpath \
+  -ldflags='-s -w' \
+  -o build/legacy-filter-builder \
+  ./cmd/legacy-filter-builder
 
-go build -trimpath -ldflags='-s -w' \
-  -o build/filtrite ./cmd/filtrite
+go build \
+  -trimpath \
+  -ldflags='-s -w' \
+  -o build/filtrite \
+  ./cmd/filtrite
 
 custom=custom-rules.txt
 [[ -f "$custom" ]] || custom=""
@@ -77,10 +104,13 @@ for manifest in "${manifests[@]}"; do
         sub(/^[[:space:]]+/, "")
         sub(/[[:space:]]+$/, "")
 
-        if ($0 == "" || $0 ~ /^!/) next
+        if ($0 == "" || $0 ~ /^!/) {
+          next
+        }
 
         count++
       }
+
       END {
         print count + 0
       }
@@ -122,12 +152,14 @@ for manifest in "${manifests[@]}"; do
     "$name" \
     "$ruleset_bytes"
 
-  # A completed manifest means all source entries accepted by the builder
-  # completed successfully.
-  printf '%s: updated %d/%d lists\n' \
+  # Generate a clickable stable latest-release download link.
+  printf \
+    '[%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d lists\n' \
+    "$name" \
     "$name" \
     "$source_count" \
-    "$source_count" >> build/release-summary.md
+    "$source_count" \
+    >> build/release-summary.md
 done
 
 echo
