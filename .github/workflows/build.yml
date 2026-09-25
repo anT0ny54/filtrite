@@ -59,8 +59,8 @@ jobs:
           files: dist/*.dat
           name: Automatic list generation
           tag_name: ${{ env.TAG_NAME }}
-          body_path: release.md
           target_commitish: ${{ github.sha }}
+          body_path: build/release-summary.md
           make_latest: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -72,3 +72,4 @@ jobs:
           delete_tags: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          
