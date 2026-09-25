@@ -13,8 +13,10 @@ on:
       - "go.mod"
       - "go.sum"
       - ".github/workflows/build.yml"
+
   schedule:
     - cron: "17 3 * * *"
+
   workflow_dispatch:
 
 concurrency:
@@ -26,16 +28,19 @@ permissions:
 
 jobs:
   build:
+    name: Build
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v5
-
-      - uses: actions/setup-go@v6
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
           go-version: "1.27.1"
           cache: true
+
+      - name: Download repo
+        uses: actions/checkout@v5
 
       - name: Run unit tests
         run: go test ./...
@@ -46,29 +51,24 @@ jobs:
           ./build.sh
 
       - name: Generate tag name
-      run: echo "TAG_NAME=$(date +%F-%H-%M)" >> $GITHUB_ENV
+        run: echo "TAG_NAME=$(date +%F-%H-%M)" >> "$GITHUB_ENV"
 
-    - name: Release filter lists
-      uses: softprops/action-gh-release@v2
-      with:
-        files: dist/*.dat
-        name: Automatic list generation
-        tag_name: ${{ env.TAG_NAME }}
-        body_path: release.md
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Release filter lists
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.dat
+          name: Automatic list generation
+          tag_name: ${{ env.TAG_NAME }}
+          body_path: release.md
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-    - name: Delete older releases
-      uses: dev-drprasad/delete-older-releases@v0.3.3
-      with:
-        keep_latest: 2
-        delete_tags: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Upload log files
-      uses: actions/upload-artifact@v4
-      with:
-        name: Logs
-        path: logs/*.log
-      if: ${{ always() }}
+      - name: Delete older releases
+        uses: dev-drprasad/delete-older-releases@v0.3.3
+        with:
+          keep_latest: 2
+          delete_tags: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
