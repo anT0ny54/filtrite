@@ -154,7 +154,7 @@ for manifest in "${manifests[@]}"; do
 
   # Generate a clickable stable latest-release download link.
   printf \
-    '[%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d lists\n' \
+    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d lists\n' \
     "$name" \
     "$name" \
     "$source_count" \
