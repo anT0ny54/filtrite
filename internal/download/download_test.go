@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,87 @@ func TestURLsFromFileRejectsWhitespace(t *testing.T) {
 	if _, err := URLsFromFile(path); err == nil || !strings.Contains(err.Error(), "whitespace") {
 		t.Fatalf("expected whitespace validation error, got %v", err)
 	}
+}
+
+func TestURLsFromFileCanonicalizesHostCase(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	input := "https://EXAMPLE.com/list.txt\nhttps://example.com/list.txt\n"
+	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	urls, err := URLsFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(urls) != 1 || urls[0] != "https://example.com/list.txt" {
+		t.Fatalf("urls=%v, want one canonical URL", urls)
+	}
+}
+
+func TestParseRetryAfter(t *testing.T) {
+	now := time.Date(2026, time.September, 25, 13, 0, 0, 0, time.UTC)
+	if got := parseRetryAfter("3", now); got != 3*time.Second {
+		t.Fatalf("delta retry-after=%s, want 3s", got)
+	}
+	if got := parseRetryAfter("999999", now); got != MaxRetryAfter {
+		t.Fatalf("large retry-after=%s, want cap %s", got, MaxRetryAfter)
+	}
+	if got := parseRetryAfter("invalid", now); got != 0 {
+		t.Fatalf("invalid retry-after=%s, want 0", got)
+	}
+	future := now.Add(5 * time.Second).Format(http.TimeFormat)
+	if got := parseRetryAfter(future, now); got != 5*time.Second {
+		t.Fatalf("date retry-after=%s, want 5s", got)
+	}
+}
+
+func TestClientRedirectGuardsHTTPSSources(t *testing.T) {
+	t.Run("downgrade", func(t *testing.T) {
+		var target string
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" {
+				http.Redirect(w, r, target, http.StatusFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		target = "http://example.com/plain.txt"
+
+		c := newClient(5 * time.Second)
+		c.http.Transport = srv.Client().Transport
+		_, err := c.http.Get(srv.URL + "/")
+		if err == nil || !strings.Contains(err.Error(), "HTTPS downgrade") {
+			t.Fatalf("redirect error=%v, want HTTPS downgrade rejection", err)
+		}
+	})
+
+	t.Run("credentials", func(t *testing.T) {
+		var target string
+		srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/" {
+				http.Redirect(w, r, target, http.StatusFound)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		target = srv.URL + "/private.txt"
+		u, err := url.Parse(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		u.User = url.UserPassword("user", "pass")
+		target = u.String()
+
+		c := newClient(5 * time.Second)
+		c.http.Transport = srv.Client().Transport
+		_, err = c.http.Get(srv.URL + "/")
+		if err == nil || !strings.Contains(err.Error(), "embedded credentials") {
+			t.Fatalf("redirect error=%v, want embedded-credentials rejection", err)
+		}
+	})
 }
 
 func TestAllDownloadsAndRetries(t *testing.T) {

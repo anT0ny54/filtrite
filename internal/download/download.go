@@ -28,6 +28,7 @@ const (
 	MaxTotalBytes  int64 = 500 << 20
 	MaxSources           = 100
 	MaxRedirects         = 5
+	MaxRetryAfter        = 2 * time.Minute
 )
 
 var ErrTooLarge = errors.New("download too large")
@@ -50,7 +51,10 @@ func newClient(timeout time.Duration) *client {
 			if len(via) >= MaxRedirects {
 				return fmt.Errorf("too many redirects")
 			}
-			if len(via) > 0 && via[len(via)-1].URL.Scheme == "https" && strings.EqualFold(req.URL.Scheme, "http") {
+			if req.URL.User != nil {
+				return fmt.Errorf("refusing redirect with embedded credentials")
+			}
+			if len(via) > 0 && strings.EqualFold(via[len(via)-1].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
 				return fmt.Errorf("refusing HTTPS downgrade")
 			}
 			return nil
@@ -87,6 +91,9 @@ func URLsFromFile(path string) ([]string, error) {
 			return nil, fmt.Errorf("source list line %d: %q: %w", lineNo, rawLine, err)
 		}
 		u.Scheme = "https"
+		// Hostnames are case-insensitive. Canonicalizing the host avoids
+		// duplicate downloads and duplicate cache entries for equivalent URLs.
+		u.Host = strings.ToLower(u.Host)
 		canonical := u.String()
 		if _, exists := seen[canonical]; exists {
 			continue
@@ -241,9 +248,21 @@ func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget
 	var last error
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
+			delay := time.Duration(500*(1<<min(attempt-1, 5))) * time.Millisecond
+			var status *statusError
+			if errors.As(last, &status) && status.RetryAfter > delay {
+				delay = status.RetryAfter
+			}
+			timer := time.NewTimer(delay)
 			select {
-			case <-time.After(time.Duration(500*(1<<min(attempt-1, 5))) * time.Millisecond):
+			case <-timer.C:
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return "", 0, ctx.Err()
 			}
 		}
@@ -272,7 +291,11 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return "", 0, &statusError{resp.StatusCode, resp.Status}
+		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+		// Drain a bounded amount of the response body so reusable connections
+		// can stay in the transport pool before this request is retried.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		return "", 0, &statusError{Code: resp.StatusCode, Status: resp.Status, RetryAfter: retryAfter}
 	}
 	if resp.ContentLength > MaxSourceBytes {
 		return "", 0, ErrTooLarge
@@ -370,12 +393,34 @@ func htmlError(path string) bool {
 }
 
 type statusError struct {
-	Code   int
-	Status string
+	Code       int
+	Status     string
+	RetryAfter time.Duration
 }
 
 func (e *statusError) Error() string {
 	return "unexpected HTTP status: " + strconv.Itoa(e.Code) + " " + e.Status
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds >= 0 {
+		if seconds > int64(MaxRetryAfter/time.Second) {
+			return MaxRetryAfter
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	if when, err := http.ParseTime(value); err == nil && when.After(now) {
+		delay := when.Sub(now)
+		if delay > MaxRetryAfter {
+			return MaxRetryAfter
+		}
+		return delay
+	}
+	return 0
 }
 func retryable(err error) bool {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTooLarge) {
