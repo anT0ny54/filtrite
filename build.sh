@@ -96,7 +96,7 @@ for manifest in "${manifests[@]}"; do
 
   echo "==> Building list: $name"
 
-  # Count actual source entries in the manifest.
+  # Count actual HTTPS source entries in the manifest.
   source_count="$(
     awk '
       {
@@ -104,11 +104,13 @@ for manifest in "${manifests[@]}"; do
         sub(/^[[:space:]]+/, "")
         sub(/[[:space:]]+$/, "")
 
-        if ($0 == "" || $0 ~ /^!/) {
+        if ($0 == "" || $0 ~ /^#/) {
           next
         }
 
-        count++
+        if (tolower($0) ~ /^https:\/\//) {
+          count++
+        }
       }
 
       END {
@@ -154,7 +156,7 @@ for manifest in "${manifests[@]}"; do
 
   # Generate a clickable stable latest-release download link.
   printf \
-    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d lists\n' \
+    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d sources\n' \
     "$name" \
     "$name" \
     "$source_count" \
