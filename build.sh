@@ -96,35 +96,26 @@ for manifest in "${manifests[@]}"; do
 
   echo "==> Building list: $name"
 
-  # Count actual HTTPS source entries in the manifest.
-  source_count="$(
-    awk '
-      {
-        sub(/\r$/, "")
-        sub(/^[[:space:]]+/, "")
-        sub(/[[:space:]]+$/, "")
-
-        if ($0 == "" || $0 ~ /^#/) {
-          next
-        }
-
-        if (tolower($0) ~ /^https:\/\//) {
-          count++
-        }
-      }
-
-      END {
-        print count + 0
-      }
-    ' "$manifest"
-  )"
-
+  # legacy-filter-builder already counts configured/succeeded sources itself
+  # and prints "Sources: N configured, M succeeded" to stdout; capture that
+  # here (while still streaming it to the console) instead of recomputing an
+  # independent count from the manifest, which could only ever equal the
+  # configured total given this script never passes --allow-partial.
+  builder_log="build/work/$name.builder-stdout.log"
   ./build/legacy-filter-builder \
     --sources "$manifest" \
     --custom "$custom" \
     --output "filters/$name.txt" \
     --build-dir "$work" \
-    --cache-dir build/source-cache
+    --cache-dir build/source-cache \
+    | tee "$builder_log"
+
+  source_line="$(grep '^Sources:' "$builder_log" | tail -n1)"
+  configured_count="$(sed -nE 's/^Sources: ([0-9]+) configured.*/\1/p' <<<"$source_line")"
+  succeeded_count="$(sed -nE 's/^Sources: [0-9]+ configured, ([0-9]+) succeeded.*/\1/p' <<<"$source_line")"
+  : "${configured_count:=0}"
+  : "${succeeded_count:=0}"
+  rm -f "$builder_log"
 
   bash ./scripts/validate.sh "filters/$name.txt"
 
@@ -156,11 +147,11 @@ for manifest in "${manifests[@]}"; do
 
   # Generate a clickable stable latest-release download link.
   printf \
-    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d lists\n' \
+    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d sources\n' \
     "$name" \
     "$name" \
-    "$source_count" \
-    "$source_count" \
+    "$succeeded_count" \
+    "$configured_count" \
     >> build/release-summary.md
 done
 
