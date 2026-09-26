@@ -38,9 +38,16 @@ func fileSize(p string) string {
 	return "unknown"
 }
 func formatBytes(n int64) string {
-	const m = 1024 * 1024
-	if n >= m {
+	const (
+		k = 1024
+		m = 1024 * k
+	)
+	switch {
+	case n >= m:
 		return fmt.Sprintf("%.2f MiB", float64(n)/float64(m))
+	case n >= k:
+		return fmt.Sprintf("%.2f KiB", float64(n)/float64(k))
+	default:
+		return fmt.Sprintf("%d bytes", n)
 	}
-	return fmt.Sprintf("%d bytes", n)
 }
