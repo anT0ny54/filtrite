@@ -16,6 +16,51 @@ type Options struct {
 	Log       string
 }
 
+func rejectAliasedPaths(input, output, logPath string) error {
+	paths := []struct {
+		name string
+		path string
+	}{
+		{name: "input", path: input},
+		{name: "output", path: output},
+	}
+	if logPath != "" {
+		paths = append(paths, struct {
+			name string
+			path string
+		}{name: "log", path: logPath})
+	}
+
+	for i := range paths {
+		a, err := filepath.Abs(paths[i].path)
+		if err != nil {
+			return fmt.Errorf("resolve %s path %q: %w", paths[i].name, paths[i].path, err)
+		}
+		paths[i].path = filepath.Clean(a)
+	}
+
+	for i := 0; i < len(paths); i++ {
+		for j := i + 1; j < len(paths); j++ {
+			if paths[i].path == paths[j].path {
+				return fmt.Errorf("%s and %s paths must not alias: %q", paths[i].name, paths[j].name, paths[i].path)
+			}
+
+			aInfo, aErr := os.Stat(paths[i].path)
+			bInfo, bErr := os.Stat(paths[j].path)
+			if aErr != nil && !os.IsNotExist(aErr) {
+				return fmt.Errorf("stat %s path %q: %w", paths[i].name, paths[i].path, aErr)
+			}
+			if bErr != nil && !os.IsNotExist(bErr) {
+				return fmt.Errorf("stat %s path %q: %w", paths[j].name, paths[j].path, bErr)
+			}
+			if aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo) {
+				return fmt.Errorf("%s and %s paths must not alias: %q and %q refer to the same file", paths[i].name, paths[j].name, paths[i].path, paths[j].path)
+			}
+		}
+	}
+	return nil
+}
+
 func Convert(ctx context.Context, o Options) error {
 	if ctx == nil {
 		ctx = context.Background()
@@ -35,6 +80,9 @@ func Convert(ctx context.Context, o Options) error {
 	}
 	if !inputInfo.Mode().IsRegular() {
 		return fmt.Errorf("input is not a regular file: %s", o.Input)
+	}
+	if err := rejectAliasedPaths(o.Input, o.Output, o.Log); err != nil {
+		return err
 	}
 	outDir := filepath.Dir(o.Output)
 	if outDir == "" {
