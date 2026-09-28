@@ -165,7 +165,7 @@ func TestAllDownloadsAndRetries(t *testing.T) {
 	}))
 	defer srv.Close()
 	dir := t.TempDir()
-	res, err := All(context.Background(), []string{srv.URL + "/ok", srv.URL + "/missing"}, dir, 2, 0, 5*time.Second)
+	res, err := AllWithCache(context.Background(), []string{srv.URL + "/ok", srv.URL + "/missing"}, dir, "", 2, 0, 5*time.Second)
 	if err == nil || len(res) != 2 || calls.Load() != 2 {
 		t.Fatalf("unexpected result err=%v results=%d calls=%d", err, len(res), calls.Load())
 	}

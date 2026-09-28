@@ -90,7 +90,6 @@ func URLsFromFile(path string) ([]string, error) {
 			}
 			return nil, fmt.Errorf("source list line %d: %q: %w", lineNo, rawLine, err)
 		}
-		u.Scheme = "https"
 		// Hostnames are case-insensitive. Canonicalizing the host avoids
 		// duplicate downloads and duplicate cache entries for equivalent URLs.
 		u.Host = strings.ToLower(u.Host)
@@ -113,19 +112,11 @@ func URLsFromFile(path string) ([]string, error) {
 	return urls, nil
 }
 
-func All(ctx context.Context, urls []string, dir string, workers, retries int, timeout time.Duration) ([]Result, error) {
-	return all(ctx, urls, dir, "", workers, retries, timeout)
-}
-
 // AllWithCache shares successfully downloaded sources across multiple list
 // manifests. The cache is deliberately keyed by the canonical URL and uses
 // atomic replacement, so a later manifest in the same build can reuse a
 // source without downloading it again.
 func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, workers, retries int, timeout time.Duration) ([]Result, error) {
-	return all(ctx, urls, dir, cacheDir, workers, retries, timeout)
-}
-
-func all(ctx context.Context, urls []string, dir, cacheDir string, workers, retries int, timeout time.Duration) ([]Result, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -155,8 +146,21 @@ func all(ctx context.Context, urls []string, dir, cacheDir string, workers, retr
 	if workers > len(urls) {
 		workers = len(urls)
 	}
+	if deadline, ok := ctx.Deadline(); ok {
+		// Each attempt can take up to `timeout`; cap retries so the
+		// worst-case total attempt time fits inside the caller's deadline
+		// instead of silently degrading into context cancellation.
+		maxAttempts := int(time.Until(deadline) / timeout)
+		if maxAttempts < 1 {
+			maxAttempts = 1
+		}
+		if retries+1 > maxAttempts {
+			retries = maxAttempts - 1
+		}
+	}
 
 	c := newClient(timeout)
+	defer c.http.CloseIdleConnections()
 	type job struct {
 		index int
 		url   string
@@ -307,30 +311,38 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 		return "", 0, err
 	}
 	tmpPath := tmp.Name()
-	cleanup := func() { tmp.Close(); os.Remove(tmpPath) }
-	defer func() { os.Remove(tmpPath) }()
+	defer func() {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+	}()
 	reader := &budgetReader{r: io.LimitReader(resp.Body, MaxSourceBytes+1), remaining: budget}
 	n, err := io.Copy(tmp, reader)
+	// The shared budget accounts for bytes that end up in published
+	// artifacts; anything discarded below is refunded so a failed or
+	// rejected download cannot silently consume the build's budget.
+	refund := func() { atomic.AddInt64(budget, n) }
 	if err != nil {
-		cleanup()
+		refund()
 		return "", 0, err
 	}
 	if n > MaxSourceBytes {
-		cleanup()
+		refund()
 		return "", n, ErrTooLarge
 	}
 	if n == 0 {
-		cleanup()
 		return "", 0, fmt.Errorf("empty response")
 	}
 	if err := tmp.Close(); err != nil {
+		refund()
 		os.Remove(tmpPath)
 		return "", n, err
 	}
 	if err := os.Rename(tmpPath, final); err != nil {
+		refund()
 		return "", n, err
 	}
 	if htmlError(final) {
+		refund()
 		os.Remove(final)
 		return "", 0, fmt.Errorf("HTML error page")
 	}
@@ -351,17 +363,23 @@ func (r *budgetReader) Read(p []byte) (int, error) {
 		remaining := atomic.LoadInt64(r.remaining)
 		if remaining <= 0 {
 			// We may have consumed the final permitted byte exactly. Probe the
-			// underlying reader once so an actual EOF is accepted, while any
-			// additional source byte still fails the global budget.
+			// underlying reader so an actual EOF is accepted, while any
+			// additional source byte still fails the global budget. A reader
+			// that keeps returning (0, nil) without progress is treated as
+			// stalled instead of spinning forever.
 			var probe [1]byte
-			n, err := r.r.Read(probe[:])
-			if n > 0 {
-				return 0, ErrTooLarge
+			for stalled := 0; ; stalled++ {
+				n, err := r.r.Read(probe[:])
+				if n > 0 {
+					return 0, ErrTooLarge
+				}
+				if err != nil {
+					return 0, err
+				}
+				if stalled >= 100 {
+					return 0, fmt.Errorf("download stalled: reader returned no data without error")
+				}
 			}
-			if err == nil {
-				continue
-			}
-			return 0, err
 		}
 
 		want := int64(len(p))
@@ -435,6 +453,6 @@ func retryable(err error) bool {
 		return true
 	}
 	var netErr net.Error
-	return errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary())
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 func shaName(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
