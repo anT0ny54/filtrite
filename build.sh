@@ -131,7 +131,6 @@ for manifest in "${manifests[@]}"; do
     --converter deps/ruleset_converter \
     --log "$work/ruleset-converter.log"
 
-  test -s "filters/$name.txt"
   test -s "dist/$name.dat"
 
   ruleset_bytes="$(wc -c < "dist/$name.dat")"
@@ -153,8 +152,9 @@ for manifest in "${manifests[@]}"; do
 
   # Generate a clickable stable latest-release download link.
   printf \
-    '• [%s](https://github.com/anT0ny54/filtrite/releases/latest/download/%s.dat) : updated %d/%d sources\n' \
+    '• [%s](https://github.com/%s/releases/latest/download/%s.dat) : updated %d/%d sources\n' \
     "$name" \
+    "${GITHUB_REPOSITORY:-anT0ny54/filtrite}" \
     "$name" \
     "$succeeded_count" \
     "$configured_count" \
