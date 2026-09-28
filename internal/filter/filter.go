@@ -444,12 +444,14 @@ func validPath(s string) bool {
 }
 
 func validDomain(s string) bool {
-	if len(s) == 0 || len(s) > 253 || strings.ContainsAny(s, "/?#^|") {
+	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
-	lower := strings.ToLower(s)
-	parts := strings.Split(lower, ".")
-	if len(parts) < 2 || lower[0] == '.' || lower[len(lower)-1] == '.' || strings.Contains(lower, "..") {
+	// Empty labels (leading/trailing dot, "..") fail the per-label length
+	// check below; the character check rejects "/?#^|" and anything else
+	// outside [A-Za-z0-9-] once lower-cased.
+	parts := strings.Split(strings.ToLower(s), ".")
+	if len(parts) < 2 {
 		return false
 	}
 	allNumeric := true
@@ -458,11 +460,12 @@ func validDomain(s string) bool {
 			return false
 		}
 		for _, r := range part {
-			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
-				return false
-			}
-			if r < '0' || r > '9' {
+			switch {
+			case r >= '0' && r <= '9':
+			case (r >= 'a' && r <= 'z') || r == '-':
 				allNumeric = false
+			default:
+				return false
 			}
 		}
 	}

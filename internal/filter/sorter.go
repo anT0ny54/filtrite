@@ -145,22 +145,28 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	last := ""
 	haveLast := false
 	for h.Len() > 0 {
-		item := heap.Pop(&h).(mergeItem)
-		if haveLast && item.line == last {
+		// Work on the heap root in place: replacing it and calling heap.Fix
+		// costs one sift-down instead of a Pop plus a Push per line.
+		line := h[0].line
+		if haveLast && line == last {
 			result.Duplicates++
 		} else {
-			if err := writeLine(w, item.line); err != nil {
+			if err := writeLine(w, line); err != nil {
 				return SortResult{}, fmt.Errorf("write generated filter list: %w", err)
 			}
 			result.Rules++
-			last = item.line
+			last = line
 			haveLast = true
 		}
 
-		next, err := nextChunkLine(item.reader)
-		if err == nil {
-			heap.Push(&h, mergeItem{line: next, reader: item.reader})
-		} else if err != io.EOF {
+		next, err := nextChunkLine(h[0].reader)
+		switch {
+		case err == nil:
+			h[0].line = next
+			heap.Fix(&h, 0)
+		case err == io.EOF:
+			heap.Pop(&h)
+		default:
 			return SortResult{}, fmt.Errorf("read merged sort chunk: %w", err)
 		}
 	}
