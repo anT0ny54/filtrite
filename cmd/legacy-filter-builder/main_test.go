@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"filtrite/internal/filter"
 )
 
 func TestRunFailsOnPartialSourceDownloadsByDefault(t *testing.T) {
@@ -33,7 +35,7 @@ func TestRunFailsOnPartialSourceDownloadsByDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := run(sources, custom, output, buildDir, cacheDir, false)
+	err := run(sources, custom, output, buildDir, cacheDir, "", false, filter.DefaultSortChunkBytes)
 	if err == nil || !strings.Contains(err.Error(), "refusing to publish a partial ruleset") {
 		t.Fatalf("run error=%v, want release-fatal partial-download error", err)
 	}
@@ -66,7 +68,7 @@ func TestRunAllowsExplicitPartialBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := run(sources, custom, output, buildDir, cacheDir, true); err != nil {
+	if err := run(sources, custom, output, buildDir, cacheDir, "", true, filter.DefaultSortChunkBytes); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(output)
@@ -78,5 +80,19 @@ func TestRunAllowsExplicitPartialBuild(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Fatalf("output=%q missing %q", text, want)
 		}
+	}
+}
+
+func TestRunValidatesCustomBeforeDownload(t *testing.T) {
+	dir := t.TempDir()
+	sources := filepath.Join(dir, "sources.txt")
+	custom := filepath.Join(dir, "missing-custom.txt")
+	if err := os.WriteFile(sources, []byte("https://127.0.0.1:1/missing.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run(sources, custom, filepath.Join(dir, "filters.txt"), filepath.Join(dir, "work"), "", "", false, filter.DefaultSortChunkBytes)
+	if err == nil || !strings.Contains(err.Error(), "custom rules") {
+		t.Fatalf("run error=%v, want custom-rule validation error before download", err)
 	}
 }
