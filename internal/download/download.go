@@ -214,6 +214,13 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		case <-ctx.Done():
 			close(jobs)
 			wg.Wait()
+			// Jobs that were never dispatched have a zero Result; mark them
+			// failed so callers cannot count them as successful downloads.
+			for i := range results {
+				if results[i].Path == "" && results[i].Err == nil {
+					results[i].Err = ctx.Err()
+				}
+			}
 			return results, ctx.Err()
 		}
 	}
@@ -334,17 +341,17 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 	}
 	if err := tmp.Close(); err != nil {
 		refund()
-		os.Remove(tmpPath)
 		return "", n, err
+	}
+	// Check the temp file before the rename so an HTML error page is never
+	// visible (or cached) under its final name.
+	if htmlError(tmpPath) {
+		refund()
+		return "", 0, fmt.Errorf("HTML error page")
 	}
 	if err := os.Rename(tmpPath, final); err != nil {
 		refund()
 		return "", n, err
-	}
-	if htmlError(final) {
-		refund()
-		os.Remove(final)
-		return "", 0, fmt.Errorf("HTML error page")
 	}
 	return final, n, nil
 }
@@ -450,6 +457,10 @@ func retryable(err error) bool {
 	}
 	// A body cut off mid-transfer is a transient network failure.
 	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	// Server closed the connection before/without a response.
+	if errors.Is(err, io.EOF) {
 		return true
 	}
 	var netErr net.Error
