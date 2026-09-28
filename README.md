@@ -88,7 +88,7 @@ Scheduled GitHub Actions workflows are disabled after 60 days without a commit t
 
 Requirements:
 
-- Go 1.23+ for this source tree.
+- Go 1.27.1+ for this source tree.
 - `curl` and `unzip`.
 - A Linux-compatible `ruleset_converter` binary is downloaded automatically on the first `build.sh` run and cached in `deps/`.
 
@@ -132,6 +132,8 @@ https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/
 Override the location with `CONVERTER_URL=<https url>`, and pin the archive with `CONVERTER_SHA256=<hex>`; when set, a checksum mismatch aborts the build. Without a pin, each fresh download uses whatever is currently published, so reproducible builds require preserving a known converter binary separately.
 
 `build.sh` checks every generated `dist/<name>.dat` against a **20 MiB default limit** and prints a warning (without failing the build) when it is exceeded. Override the ceiling with `MAX_RULESET_BYTES=<bytes>`.
+
+The legacy-filter builder uses an **8 MiB default in-memory sort chunk**. For larger-memory environments, increase it with `--sort-chunk-bytes <bytes>` to reduce temporary chunk-file I/O; the default is retained for low-memory CI/build hosts.
 
 ## ✅ Validation
 

@@ -54,8 +54,14 @@ if [[ ! -x deps/ruleset_converter ]]; then
       }
   fi
 
-  # -j: accept the binary at the archive root or inside a sub-directory.
-  unzip -oqj "$tmp" '*ruleset_converter' -d deps
+  # -j: accept the binary at the archive root or inside a sub-directory, but
+  # fail loudly if the archive ever ships more than one matching binary.
+  mapfile -t converter_entries < <(unzip -Z1 "$tmp" '*ruleset_converter')
+  (( ${#converter_entries[@]} == 1 )) || {
+    echo "ERROR: expected exactly one ruleset_converter in converter archive, found ${#converter_entries[@]}" >&2
+    exit 1
+  }
+  unzip -oqj "$tmp" "${converter_entries[0]}" -d deps
   chmod +x deps/ruleset_converter
 fi
 
@@ -97,24 +103,24 @@ for manifest in "${manifests[@]}"; do
   echo "==> Building list: $name"
 
   # legacy-filter-builder already counts configured/succeeded sources itself
-  # and prints "Sources: N configured, M succeeded" to stdout; capture that
-  # here (while still streaming it to the console) instead of recomputing an
-  # independent count from the manifest, which could only ever equal the
-  # configured total given this script never passes --allow-partial.
+  # and writes them to a machine-readable key=value summary file; stream its
+  # human-readable stdout to the console and read the counts from the summary
+  # instead of scraping stdout with grep/sed.
   builder_log="build/work/$name.builder-stdout.log"
+  summary_file="$work/build-summary.env"
   ./build/legacy-filter-builder \
     --sources "$manifest" \
     --custom "$custom" \
     --output "filters/$name.txt" \
     --build-dir "$work" \
     --cache-dir build/source-cache \
+    --summary "$summary_file" \
     | tee "$builder_log"
 
-  source_line="$(grep '^Sources:' "$builder_log" | tail -n1)"
-  configured_count="$(sed -nE 's/^Sources: ([0-9]+) configured.*/\1/p' <<<"$source_line")"
-  succeeded_count="$(sed -nE 's/^Sources: [0-9]+ configured, ([0-9]+) succeeded.*/\1/p' <<<"$source_line")"
-  : "${configured_count:=0}"
-  : "${succeeded_count:=0}"
+  # shellcheck disable=SC1090
+  source "$summary_file"
+  configured_count="${sources_configured:-0}"
+  succeeded_count="${sources_succeeded:-0}"
   rm -f "$builder_log"
 
   bash ./scripts/validate.sh "filters/$name.txt"
