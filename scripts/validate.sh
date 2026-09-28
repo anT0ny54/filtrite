@@ -24,7 +24,8 @@ BEGIN{bad=0}
   exception=0
   if(line~/^@@/) exception=1
   dollar=0
-  for(i=length(line);i>=1;i--){ if(substr(line,i,1)=="$"){dollar=i;break} }
+  # Position of the last "$" (same split point as filter.go).
+  if(match(line,/\$[^$]*$/)) dollar=RSTART
   if(dollar>0){
     mods=substr(line,dollar+1)
     line=substr(line,1,dollar-1)
