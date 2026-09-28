@@ -2,7 +2,6 @@ package filter
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,43 +11,16 @@ import (
 )
 
 type Stats struct {
-	Read       int
-	Rejected   int
-	Duplicates int
-	ByReason   map[string]int
+	Read     int
+	Rejected int
+	ByReason map[string]int
 }
 
 type Builder struct{}
 
 type RuleSink func(string) error
 
-func (b Builder) ReadFile(input, rejectedPath string) ([]string, Stats, error) {
-	return b.ReadFileWithSeen(input, rejectedPath, nil)
-}
-
-// ReadFileWithSeen behaves like ReadFile, but uses globalSeen to deduplicate
-// normalized rules across multiple input files when non-nil.
-func (b Builder) ReadFileWithSeen(input, rejectedPath string, globalSeen map[string]struct{}) ([]string, Stats, error) {
-	rules := make([]string, 0, 4096)
-	seen := globalSeen
-	if seen == nil {
-		seen = make(map[string]struct{}, 4096)
-	}
-	stats, err := b.ReadFileToSink(input, rejectedPath, func(rule string) error {
-		if _, exists := seen[rule]; exists {
-			return errDuplicateRule
-		}
-		seen[rule] = struct{}{}
-		rules = append(rules, rule)
-		return nil
-	})
-	if err != nil {
-		return nil, stats, err
-	}
-	return rules, stats, nil
-}
-
-var errDuplicateRule = fmt.Errorf("duplicate rule")
+var reportSanitizer = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
 
 // ReadFileToSink parses and normalizes one input file without retaining its
 // accepted rules. The sink owns downstream storage, which allows the
@@ -98,52 +70,13 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 			continue
 		}
 		if err := sink(rule); err != nil {
-			if errors.Is(err, errDuplicateRule) {
-				stats.Duplicates++
-				continue
-			}
 			return stats, fmt.Errorf("store normalized rule from %s: %w", input, err)
 		}
 	}
 	if err := sc.Err(); err != nil {
 		return stats, fmt.Errorf("scan %s: %w", input, err)
 	}
-	if err := rej.Sync(); err != nil {
-		return stats, fmt.Errorf("sync rejected report: %w", err)
-	}
 	return stats, nil
-}
-
-// Optimize performs only transformations that are provably semantics-preserving
-// for the legacy Chromium subresource_filter syntax:
-//   - exact duplicate removal;
-//   - canonical ordering; and
-//   - Chromium's required third-party guard on bare ||host^ blocks.
-//
-// It deliberately does not perform path/domain/modifier subsumption because
-// those rules can differ in first-party/third-party or initiator-domain scope.
-func Optimize(rules []string) ([]string, int) {
-	set := make(map[string]struct{}, len(rules))
-	duplicateCount := 0
-	for _, rule := range rules {
-		if rule == "" {
-			continue
-		}
-		rule = optimizeRule(rule)
-		if _, exists := set[rule]; exists {
-			duplicateCount++
-			continue
-		}
-		set[rule] = struct{}{}
-	}
-
-	out := make([]string, 0, len(set))
-	for rule := range set {
-		out = append(out, rule)
-	}
-
-	sort.Strings(out)
-	return out, duplicateCount
 }
 
 func optimizeRule(rule string) string {
@@ -388,7 +321,8 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 
 		switch name {
 		case "third-party":
-			if hasValue || negated && thirdParty == "third-party" || !negated && thirdParty == "~third-party" {
+			conflict := (negated && thirdParty == "third-party") || (!negated && thirdParty == "~third-party")
+			if hasValue || conflict {
 				return "", false
 			}
 			if _, exists := seen[name]; exists {
@@ -536,5 +470,5 @@ func validDomain(s string) bool {
 }
 
 func sanitizeReport(s string) string {
-	return strings.NewReplacer("\t", " ", "\n", " ", "\r", " ").Replace(s)
+	return reportSanitizer.Replace(s)
 }

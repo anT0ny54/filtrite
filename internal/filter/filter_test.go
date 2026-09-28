@@ -7,6 +7,47 @@ import (
 	"testing"
 )
 
+func readRules(t *testing.T, in, rej string) ([]string, Stats) {
+	t.Helper()
+	var rules []string
+	st, err := (Builder{}).ReadFileToSink(in, rej, func(rule string) error {
+		rules = append(rules, rule)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rules, st
+}
+
+// optimizeRules is the test replacement for the removed package-level
+// Optimize API. It exercises the same production transformation used by the
+// builder: the third-party guard applied by ExternalSorter.Add, followed by
+// deduplication, canonical sorting, and merge.
+func optimizeRules(t *testing.T, rules []string) ([]string, int) {
+	t.Helper()
+	dir := t.TempDir()
+	out := filepath.Join(dir, "out.txt")
+	sorter, err := NewExternalSorter(filepath.Join(dir, "sort"), DefaultSortChunkBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range rules {
+		if err := sorter.Add(rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := sorter.Finish(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), result.Duplicates
+}
+
 func TestBuilderAndOptimizer(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
@@ -24,11 +65,8 @@ func TestBuilderAndOptimizer(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
-	final, duplicates := Optimize(rules)
+	rules, st := readRules(t, in, rej)
+	final, duplicates := optimizeRules(t, rules)
 	if len(final) != 4 || duplicates != 0 {
 		t.Fatalf("final=%v duplicates=%d", final, duplicates)
 	}
@@ -61,10 +99,7 @@ func TestBareHostWithoutTerminatorIsRejected(t *testing.T) {
 	if err := os.WriteFile(in, []byte("||bare.example\n||terminated.example^\n||ended.example|\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	if len(rules) != 2 {
 		t.Fatalf("rules=%v, want exactly 2 accepted rules", rules)
 	}
@@ -85,36 +120,6 @@ func TestBareHostWithoutTerminatorIsRejected(t *testing.T) {
 	}
 }
 
-func TestReadFileWithSeenDeduplicatesAcrossFiles(t *testing.T) {
-	dir := t.TempDir()
-	first := filepath.Join(dir, "first.txt")
-	second := filepath.Join(dir, "second.txt")
-	rej1 := filepath.Join(dir, "rej1.txt")
-	rej2 := filepath.Join(dir, "rej2.txt")
-	if err := os.WriteFile(first, []byte("||same.example^\n||first.example^\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(second, []byte("||same.example^\n||second.example^\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	seen := make(map[string]struct{})
-	b := Builder{}
-	firstRules, firstStats, err := b.ReadFileWithSeen(first, rej1, seen)
-	if err != nil {
-		t.Fatal(err)
-	}
-	secondRules, secondStats, err := b.ReadFileWithSeen(second, rej2, seen)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(firstRules) != 2 || len(secondRules) != 1 || secondRules[0] != "||second.example^" {
-		t.Fatalf("first=%v second=%v", firstRules, secondRules)
-	}
-	if firstStats.Duplicates != 0 || secondStats.Duplicates != 1 {
-		t.Fatalf("firstStats=%+v secondStats=%+v", firstStats, secondStats)
-	}
-}
-
 func TestOptimizeKeepsDifferentMetadataScopes(t *testing.T) {
 	rules := []string{
 		"||scope.example^",
@@ -122,7 +127,7 @@ func TestOptimizeKeepsDifferentMetadataScopes(t *testing.T) {
 		"||scope.example^$domain=publisher.example",
 		"||scope.example/path^",
 	}
-	final, duplicates := Optimize(rules)
+	final, duplicates := optimizeRules(t, rules)
 	if duplicates != 0 || len(final) != 4 {
 		t.Fatalf("final=%v duplicates=%d", final, duplicates)
 	}
@@ -165,11 +170,8 @@ func TestModifierHandling(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
-	final, _ := Optimize(rules)
+	rules, st := readRules(t, in, rej)
+	final, _ := optimizeRules(t, rules)
 
 	present := map[string]bool{}
 	for _, rule := range final {
@@ -213,7 +215,7 @@ func TestOptimizeDeduplicatesAfterThirdPartyGuard(t *testing.T) {
 		"||dup.example^$third-party",
 		"||other.example^",
 	}
-	final, duplicates := Optimize(rules)
+	final, duplicates := optimizeRules(t, rules)
 	if duplicates != 1 {
 		t.Fatalf("duplicates=%d, want 1 (final=%v)", duplicates, final)
 	}
@@ -249,7 +251,7 @@ func TestOptimizeThirdPartyGuardMatchesChromiumRule(t *testing.T) {
 		"||already.example^$third-party",
 		"@@||allow.example^",
 	}
-	final, duplicates := Optimize(rules)
+	final, duplicates := optimizeRules(t, rules)
 	if duplicates != 0 || len(final) != len(rules) {
 		t.Fatalf("final=%v duplicates=%d", final, duplicates)
 	}
@@ -281,10 +283,7 @@ func TestDomainListRejectsConflictingScope(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	if len(rules) != 1 || st.ByReason["unsupported-modifier"] != 1 {
 		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
 	}
@@ -302,8 +301,8 @@ func TestOptimizeIsIdempotent(t *testing.T) {
 		"||c.example^$third-party",
 		"||d.example/x?y=1",
 	}
-	first, _ := Optimize(rules)
-	second, duplicatesAgain := Optimize(first)
+	first, _ := optimizeRules(t, rules)
+	second, duplicatesAgain := optimizeRules(t, first)
 	if duplicatesAgain != 0 {
 		t.Fatalf("optimized output is not idempotent: second pass removed %d duplicates from %v", duplicatesAgain, first)
 	}
@@ -324,10 +323,7 @@ func TestRuleWhitespaceIsRejected(t *testing.T) {
 	if err := os.WriteFile(in, []byte(" ||space.example^\n||ok.example^\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	if len(rules) != 1 || st.Rejected != 1 || st.ByReason["non-ascii-or-whitespace"] != 1 {
 		t.Fatalf("rules=%v stats=%+v", rules, st)
 	}
@@ -349,10 +345,7 @@ func TestElementTypeModifiers(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	present := map[string]bool{}
 	for _, r := range rules {
 		present[r] = true
@@ -397,10 +390,7 @@ func TestActivationTypeModifiersAreExceptionOnly(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	present := map[string]bool{}
 	for _, r := range rules {
 		present[r] = true
@@ -424,7 +414,7 @@ func TestElementTypeModifiersSurviveOptimize(t *testing.T) {
 		"||a.example^$script,image",
 		"@@||b.example^$document",
 	}
-	final, duplicates := Optimize(rules)
+	final, duplicates := optimizeRules(t, rules)
 	if duplicates != 0 || len(final) != 2 {
 		t.Fatalf("final=%v duplicates=%d", final, duplicates)
 	}
@@ -454,10 +444,7 @@ func TestFullyAnchoredURLRules(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	present := map[string]bool{}
 	for _, r := range rules {
 		present[r] = true
@@ -499,15 +486,12 @@ func TestFullyAnchoredURLHostCasingDeduplicates(t *testing.T) {
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, _, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
+	rules, _ := readRules(t, in, rej)
+	if len(rules) != 2 || rules[0] != "|https://ads.example.com/x" || rules[1] != "|https://ads.example.com/x" {
+		t.Fatalf("rules=%v, want two canonicalized rules", rules)
 	}
-	if len(rules) != 1 || rules[0] != "|https://ads.example.com/x" {
-		t.Fatalf("rules=%v, want exactly 1 rule %q", rules, "|https://ads.example.com/x")
-	}
-	final, duplicates := Optimize(rules)
-	if duplicates != 0 || len(final) != 1 || final[0] != "|https://ads.example.com/x" {
+	final, duplicates := optimizeRules(t, rules)
+	if duplicates != 1 || len(final) != 1 || final[0] != "|https://ads.example.com/x" {
 		t.Fatalf("final=%v duplicates=%d", final, duplicates)
 	}
 }
@@ -519,10 +503,7 @@ func TestHostsEntriesRejectTrailingFields(t *testing.T) {
 	if err := os.WriteFile(in, []byte("0.0.0.0 ads.example extra\n127.0.0.1 ads2.example\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	rules, st, err := (Builder{}).ReadFile(in, rej)
-	if err != nil {
-		t.Fatal(err)
-	}
+	rules, st := readRules(t, in, rej)
 	if len(rules) != 1 || st.ByReason["invalid-host-entry"] != 1 {
 		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
 	}
@@ -542,7 +523,7 @@ func TestReadFileToSinkStreamsRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if st.Read != 3 || st.Rejected != 0 || st.Duplicates != 0 {
+	if st.Read != 3 || st.Rejected != 0 {
 		t.Fatalf("unexpected stats: %+v", st)
 	}
 	if len(got) != 3 {

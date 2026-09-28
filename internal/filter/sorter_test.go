@@ -72,3 +72,24 @@ func TestExternalSorterForcesMultipleChunks(t *testing.T) {
 		t.Fatalf("rules=%v, want %v", got, want)
 	}
 }
+
+func TestExternalSorterRejectsUseAfterFinish(t *testing.T) {
+	dir := t.TempDir()
+	output := filepath.Join(dir, "filters.txt")
+	sorter, err := NewExternalSorter(filepath.Join(dir, "sort"), 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sorter.Add("||example.com^"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sorter.Finish(output); err != nil {
+		t.Fatal(err)
+	}
+	if err := sorter.Add("||another.example^"); err == nil {
+		t.Fatal("Add after Finish succeeded")
+	}
+	if _, err := sorter.Finish(output); err == nil {
+		t.Fatal("second Finish succeeded")
+	}
+}

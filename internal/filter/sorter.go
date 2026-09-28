@@ -28,6 +28,7 @@ type ExternalSorter struct {
 	bytes      int64
 	duplicates int
 	chunks     []string
+	finished   bool
 }
 
 func NewExternalSorter(dir string, chunkBytes int64) (*ExternalSorter, error) {
@@ -50,6 +51,9 @@ func NewExternalSorter(dir string, chunkBytes int64) (*ExternalSorter, error) {
 func (s *ExternalSorter) Add(rule string) error {
 	if s == nil {
 		return fmt.Errorf("external sorter is nil")
+	}
+	if s.finished {
+		return fmt.Errorf("external sorter is already finished")
 	}
 	if rule == "" {
 		return nil
@@ -75,6 +79,10 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	if s == nil {
 		return SortResult{}, fmt.Errorf("external sorter is nil")
 	}
+	if s.finished {
+		return SortResult{}, fmt.Errorf("external sorter is already finished")
+	}
+	s.finished = true
 	defer func() {
 		for _, path := range s.chunks {
 			_ = os.Remove(path)
@@ -229,11 +237,11 @@ type mergeItem struct {
 
 type mergeHeap []mergeItem
 
-func (h mergeHeap) Len() int            { return len(h) }
-func (h mergeHeap) Less(i, j int) bool  { return h[i].line < h[j].line }
-func (h mergeHeap) Swap(i, j int)       { h[i], h[j] = h[j], h[i] }
-func (h *mergeHeap) Push(x interface{}) { *h = append(*h, x.(mergeItem)) }
-func (h *mergeHeap) Pop() interface{} {
+func (h mergeHeap) Len() int           { return len(h) }
+func (h mergeHeap) Less(i, j int) bool { return h[i].line < h[j].line }
+func (h mergeHeap) Swap(i, j int)      { h[i], h[j] = h[j], h[i] }
+func (h *mergeHeap) Push(x any)        { *h = append(*h, x.(mergeItem)) }
+func (h *mergeHeap) Pop() any {
 	old := *h
 	n := len(old)
 	item := old[n-1]
