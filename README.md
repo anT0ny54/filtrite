@@ -40,7 +40,7 @@ Modifier duplicates and conflicts are rejected rather than resolved implicitly. 
 
 Cosmetic selectors, scriptlets/procedural syntax, regex filters, metadata records, malformed hosts, malformed modifiers, non-ASCII/whitespace-bearing rules, and any other network syntax outside the supported subset. This includes `$` options Chromium's own rule parser marks as not implemented for this legacy engine — `$sitekey`, `$collapse`, `$donottrack` — plus deprecated element-type aliases; these are rejected the same way Chromium's parser itself would reject them, not silently dropped or approximated.
 
-This is intentional: a rule is either safely representable in the target engine or it is rejected.
+This is intentional: a rule is either safely representable in the target engine or it is rejected. Exception-prefixed hosts-file records (e.g. `@@0.0.0.0 host.example`) are rejected as unsupported exception rules rather than silently converted into block rules.
 
 ### Third-party guard
 
@@ -54,13 +54,15 @@ Other metadata-scoped rules are **not** removed merely because a broader host ru
 
 Every build writes `build/work/<name>/rejected-*.txt` reports for each list `<name>` (see "Multiple named lists" below). Each report contains the original source line number, rejection reason, and sanitized original rule so unsupported syntax is auditable rather than silently discarded.
 
+Report files are named `rejected-<hash>.txt` — one per source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`.
+
 ## 🌐 Source lists
 
 Every file matching `lists/*.txt` is an independent source manifest; the default is [`lists/adblock.txt`](lists/adblock.txt). Each manifest is a simple URL-per-line file; blank lines and `#` comments are ignored.
 
 Source URLs must be valid **HTTPS URLs without embedded credentials**. Invalid entries fail the build with a line-numbered error instead of being silently skipped.
 
-The downloader also enforces per-source and combined download-size limits, follows a small bounded number of redirects, refuses HTTPS→HTTP downgrade redirects, rejects obvious HTML error pages, and preserves source result order for deterministic reporting.
+The downloader also enforces per-source (50 MiB) and combined per-manifest (500 MiB) download-size limits, a 100-source cap per manifest, 8 parallel workers, bounded retries with `Retry-After` support, follows a small bounded number of redirects, refuses HTTPS→HTTP downgrade redirects, rejects obvious HTML error pages, and preserves source result order for deterministic reporting.
 
 The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
 
@@ -70,7 +72,7 @@ When multiple manifests contain the same source URL, a shared cache directory ca
 
 ## 🧾 Multiple named lists
 
-`build.sh` builds **every** manifest under `lists/*.txt`, independently, into its own `filters/<name>.txt` intermediate and `dist/<name>.dat` release artifact (`<name>` is the manifest's filename without `.txt`). `custom-rules.txt` is layered onto every list the same way, while identical source URLs are reused from the shared per-build download cache.
+`build.sh` builds **every** manifest under `lists/*.txt`, independently, into its own `filters/<name>.txt` intermediate and `dist/<name>.dat` release artifact (`<name>` is the manifest's filename without `.txt`). `custom-rules.txt` is layered onto every list the same way, while identical source URLs are reused from the shared per-build download cache. `custom-rules.txt` is only layered on when it exists **and is non-empty**: when the file is missing, `build.sh` passes an empty `--custom ""` (which disables custom rules), and the builder skips a 0-byte file.
 
 To add another list (e.g. a smaller or region-specific one), drop a new manifest next to the default one:
 
@@ -82,14 +84,14 @@ lists/minimal.txt   -> filters/minimal.txt , dist/minimal.dat
 
 Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project.
 
-Scheduled GitHub Actions workflows are disabled after 60 days without a commit to the repository, so an inactive fork eventually stops publishing new releases and drops out of search results until something is pushed again.
+GitHub disables scheduled workflows after 60 days without repository activity. To prevent that, `.github/workflows/Keep-Alive.yml` runs on the 1st and 15th of each month (03:17 UTC) and commits a timestamp to `.github/keep-alive.txt` (`[skip ci]`, so it does not trigger a build).
 
 ## 🛠️ Build
 
 Requirements:
 
 - Go 1.27.1+ for this source tree.
-- `curl` and `unzip`.
+- `curl`, `unzip`, and `sha256sum` (the last only when `CONVERTER_SHA256` is set).
 - A Linux-compatible `ruleset_converter` binary is downloaded automatically on the first `build.sh` run and cached in `deps/`.
 
 Run:
@@ -133,6 +135,8 @@ Override the location with `CONVERTER_URL=<https url>`, and pin the archive with
 
 `build.sh` checks every generated `dist/<name>.dat` against a **20 MiB default limit** and prints a warning (without failing the build) when it is exceeded. Override the ceiling with `MAX_RULESET_BYTES=<bytes>`.
 
+`filtrite` (the converter wrapper) takes `--input`, `--output`, `--converter`, `--log`, and `--timeout` (default 5 minutes). `legacy-filter-builder` takes `--sources`, `--custom`, `--output`, `--build-dir`, `--cache-dir`, `--summary` (key=value file that `build.sh` reads for the sources configured/succeeded/cached counts), `--allow-partial`, and `--sort-chunk-bytes`.
+
 The legacy-filter builder uses an **8 MiB default in-memory sort chunk**. For larger-memory environments, increase it with `--sort-chunk-bytes <bytes>` to reduce temporary chunk-file I/O; the default is retained for low-memory CI/build hosts.
 
 ## ✅ Validation
@@ -163,7 +167,7 @@ For Cromite, use this output only when the specific build/configuration you are 
 
 1. Fork the repository if you want your own independently maintained build.
 2. Edit `lists/adblock.txt` to add/remove source URLs, and/or add another `lists/<name>.txt` manifest for a separate named list.
-3. Edit `custom-rules.txt` for local legacy-compatible network rules; it's applied to every list.
+3. Edit `custom-rules.txt` for local legacy-compatible network rules; it's applied to every list when non-empty (an empty file is skipped).
 4. Run the test suite (`go test ./...`).
 5. Run `./build.sh`.
 6. Publish the generated `dist/<name>.dat` assets from your release process.
@@ -174,7 +178,7 @@ Keep custom rules within the supported syntax policy above. A rule that is usefu
 
 Third-party filter sources keep their own licenses and terms. Do not assume that the MIT license covering this repository also licenses the downloaded filter content.
 
-The GitHub Actions workflow runs tests before building and validates every generated list. Pushes touching any `lists/*.txt` manifest trigger the build, and releases publish every generated `dist/*.dat` asset. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
+The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
 
 ## 📄 License
 

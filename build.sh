@@ -102,11 +102,10 @@ for manifest in "${manifests[@]}"; do
 
   echo "==> Building list: $name"
 
-  # legacy-filter-builder already counts configured/succeeded sources itself
-  # and writes them to a machine-readable key=value summary file; stream its
-  # human-readable stdout to the console and read the counts from the summary
-  # instead of scraping stdout with grep/sed.
-  builder_log="build/work/$name.builder-stdout.log"
+  # legacy-filter-builder counts configured/succeeded sources itself and
+  # writes them to a machine-readable key=value summary file; its
+  # human-readable stdout goes straight to the console. An empty --custom
+  # disables custom rules (custom-rules.txt missing).
   summary_file="$work/build-summary.env"
   ./build/legacy-filter-builder \
     --sources "$manifest" \
@@ -114,14 +113,12 @@ for manifest in "${manifests[@]}"; do
     --output "filters/$name.txt" \
     --build-dir "$work" \
     --cache-dir build/source-cache \
-    --summary "$summary_file" \
-    | tee "$builder_log"
+    --summary "$summary_file"
 
   # shellcheck disable=SC1090
   source "$summary_file"
   configured_count="${sources_configured:-0}"
   succeeded_count="${sources_succeeded:-0}"
-  rm -f "$builder_log"
 
   bash ./scripts/validate.sh "filters/$name.txt"
 
