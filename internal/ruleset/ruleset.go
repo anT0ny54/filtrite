@@ -39,21 +39,23 @@ func rejectAliasedPaths(input, output, logPath string) error {
 		paths[i].path = filepath.Clean(a)
 	}
 
+	// Stat each canonical path exactly once; the pairwise loop below only
+	// reads the cached results.
+	infos := make([]os.FileInfo, len(paths))
+	statErrs := make([]error, len(paths))
+	for i := range paths {
+		infos[i], statErrs[i] = os.Stat(paths[i].path)
+	}
+
 	for i := 0; i < len(paths); i++ {
+		if statErrs[i] != nil && !os.IsNotExist(statErrs[i]) {
+			return fmt.Errorf("stat %s path %q: %w", paths[i].name, paths[i].path, statErrs[i])
+		}
 		for j := i + 1; j < len(paths); j++ {
 			if paths[i].path == paths[j].path {
 				return fmt.Errorf("%s and %s paths must not alias: %q", paths[i].name, paths[j].name, paths[i].path)
 			}
-
-			aInfo, aErr := os.Stat(paths[i].path)
-			bInfo, bErr := os.Stat(paths[j].path)
-			if aErr != nil && !os.IsNotExist(aErr) {
-				return fmt.Errorf("stat %s path %q: %w", paths[i].name, paths[i].path, aErr)
-			}
-			if bErr != nil && !os.IsNotExist(bErr) {
-				return fmt.Errorf("stat %s path %q: %w", paths[j].name, paths[j].path, bErr)
-			}
-			if aErr == nil && bErr == nil && os.SameFile(aInfo, bInfo) {
+			if statErrs[i] == nil && statErrs[j] == nil && os.SameFile(infos[i], infos[j]) {
 				return fmt.Errorf("%s and %s paths must not alias: %q and %q refer to the same file", paths[i].name, paths[j].name, paths[i].path, paths[j].path)
 			}
 		}
@@ -84,10 +86,7 @@ func Convert(ctx context.Context, o Options) error {
 	if err := rejectAliasedPaths(o.Input, o.Output, o.Log); err != nil {
 		return err
 	}
-	outDir := filepath.Dir(o.Output)
-	if outDir == "" {
-		outDir = "."
-	}
+	outDir := filepath.Dir(o.Output) // never empty: "." for a bare filename
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return err
 	}
@@ -105,11 +104,7 @@ func Convert(ctx context.Context, o Options) error {
 	cmd := exec.CommandContext(ctx, o.Converter, args...)
 	var logf *os.File
 	if o.Log != "" {
-		logDir := filepath.Dir(o.Log)
-		if logDir == "" {
-			logDir = "."
-		}
-		if err := os.MkdirAll(logDir, 0o755); err != nil {
+		if err := os.MkdirAll(filepath.Dir(o.Log), 0o755); err != nil {
 			return fmt.Errorf("create log directory: %w", err)
 		}
 		logf, err = os.Create(o.Log)
