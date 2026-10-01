@@ -28,9 +28,8 @@ func main() {
 	allowPartial := flag.Bool("allow-partial", false, "continue when one or more source downloads fail")
 	sortChunkBytes := flag.Int64("sort-chunk-bytes", filter.DefaultSortChunkBytes, "maximum in-memory sorter chunk size in bytes")
 	flag.Parse()
-	if *sortChunkBytes <= 0 {
-		log.Fatalf("sort-chunk-bytes must be positive")
-	}
+	// Note: run() validates sortChunkBytes positivity; validating it here too
+	// would duplicate that check.
 	if err := run(*sources, *custom, *output, *buildDir, *cacheDir, *summary, *allowPartial, *sortChunkBytes); err != nil {
 		log.Fatal(err)
 	}
@@ -143,14 +142,12 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		}
 		accumulate(st)
 	}
-	if custom != "" {
-		if customInfo.Size() > 0 {
-			st, err := b.ReadFileToSink(custom, filepath.Join(buildDir, "rejected-custom.txt"), sorter.Add)
-			if err != nil {
-				return err
-			}
-			accumulate(st)
+	if custom != "" && customInfo.Size() > 0 {
+		st, err := b.ReadFileToSink(custom, filepath.Join(buildDir, "rejected-custom.txt"), sorter.Add)
+		if err != nil {
+			return err
 		}
+		accumulate(st)
 	}
 	result, err := sorter.Finish(outFile)
 	if err != nil {
