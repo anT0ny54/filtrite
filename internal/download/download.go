@@ -337,6 +337,10 @@ func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) 
 		return "", n, ErrTooLarge
 	}
 	if n == 0 {
+		// Consistent with every other failure path: refund the (zero-byte)
+		// copy so this branch stays correct if it ever moves below other
+		// accounting.
+		refund()
 		return "", 0, fmt.Errorf("empty response")
 	}
 	if err := tmp.Close(); err != nil {
