@@ -165,6 +165,8 @@ func TestModifierHandling(t *testing.T) {
 		"||collapsed.example^$collapse",
 		"||duplicate-mod.example^$third-party,third-party",
 		"||conflict-mod.example^$third-party,~third-party",
+		"@@0.0.0.0 exception-hosts.example",
+		"@@127.0.0.1 exception-hosts2.example",
 		"||duplicate-domain.example^$domain=foo.example|foo.example",
 	}, "\n")
 	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
@@ -313,6 +315,23 @@ func TestOptimizeIsIdempotent(t *testing.T) {
 		if first[i] != second[i] {
 			t.Fatalf("rule text changed on second pass: %q vs %q", first[i], second[i])
 		}
+	}
+}
+
+func TestExceptionHostsEntryUsesUnsupportedExceptionReason(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rej.txt")
+	if err := os.WriteFile(in, []byte("@@0.0.0.0 exception-hosts.example\\n@@127.0.0.1 exception-hosts2.example\\n@@::1 exception-hosts3.example\\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	rules, st := readRules(t, in, rej)
+	if len(rules) != 0 || st.Rejected != 3 || st.ByReason["unsupported-exception-rule"] != 3 {
+		t.Fatalf("rules=%v stats=%+v", rules, st)
+	}
+	if st.ByReason["non-ascii-or-whitespace"] != 0 {
+		t.Fatalf("unexpected non-ascii-or-whitespace rejection: %+v", st.ByReason)
 	}
 }
 

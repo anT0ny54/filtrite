@@ -97,10 +97,7 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	}
 	result.Duplicates = s.duplicates
 
-	outDir := filepath.Dir(output)
-	if outDir == "" {
-		outDir = "."
-	}
+	outDir := filepath.Dir(output) // never empty: "." for a bare filename
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return SortResult{}, fmt.Errorf("create output directory: %w", err)
 	}
@@ -171,9 +168,6 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 		}
 	}
 
-	if result.Rules == 0 {
-		return SortResult{}, fmt.Errorf("no compatible rules generated")
-	}
 	if err := w.Flush(); err != nil {
 		return SortResult{}, fmt.Errorf("flush generated filter list: %w", err)
 	}

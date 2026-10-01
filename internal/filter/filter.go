@@ -95,27 +95,9 @@ func isBareDomainBlock(rule string) bool {
 }
 
 func normalize(line string) (string, string, bool) {
-	// Hosts-file records legitimately contain a separator; only accept the
-	// canonical address + exactly one hostname so extra fields are not ignored.
-	for _, prefix := range []string{"0.0.0.0 ", "127.0.0.1 ", "::1 "} {
-		if strings.HasPrefix(line, prefix) {
-			fields := strings.Fields(line)
-			if len(fields) == 2 && validDomain(fields[1]) {
-				return "||" + strings.ToLower(fields[1]) + "^", "", true
-			}
-			return "", "invalid-host-entry", false
-		}
-	}
-
 	if !utf8.ValidString(line) {
 		return "", "invalid-utf8", false
 	}
-	for _, r := range line {
-		if r < 0x21 || r > 0x7e {
-			return "", "non-ascii-or-whitespace", false
-		}
-	}
-
 	for _, marker := range []string{
 		"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
 		"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
@@ -137,6 +119,30 @@ func normalize(line string) (string, string, bool) {
 		line = line[2:]
 		if line == "" {
 			return "", "unsupported-exception-rule", false
+		}
+	}
+
+	// Hosts-file records legitimately contain a separator; only accept the
+	// canonical address + exactly one hostname so extra fields are not ignored.
+	// An exception-prefixed hosts record is not representable as a block rule,
+	// so reject it before generic character validation can report a different
+	// reason.
+	for _, prefix := range []string{"0.0.0.0 ", "127.0.0.1 ", "::1 "} {
+		if strings.HasPrefix(line, prefix) {
+			if exception {
+				return "", "unsupported-exception-rule", false
+			}
+			fields := strings.Fields(line)
+			if len(fields) == 2 && validDomain(fields[1]) {
+				return "||" + strings.ToLower(fields[1]) + "^", "", true
+			}
+			return "", "invalid-host-entry", false
+		}
+	}
+
+	for _, r := range line {
+		if r < 0x21 || r > 0x7e {
+			return "", "non-ascii-or-whitespace", false
 		}
 	}
 
@@ -321,8 +327,10 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 
 		switch name {
 		case "third-party":
-			conflict := (negated && thirdParty == "third-party") || (!negated && thirdParty == "~third-party")
-			if hasValue || conflict {
+			// Duplicate detection via seen[name] already rejects both
+			// "third-party,third-party" and "third-party,~third-party": "~" is
+			// stripped before the switch, so both signs share the name.
+			if hasValue {
 				return "", false
 			}
 			if _, exists := seen[name]; exists {
