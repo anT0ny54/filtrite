@@ -20,7 +20,7 @@ on:
 
 concurrency:
   group: legacy-bromite-adblock
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 permissions:
   contents: write
