@@ -322,7 +322,7 @@ func TestExceptionHostsEntryUsesUnsupportedExceptionReason(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
 	rej := filepath.Join(dir, "rej.txt")
-	if err := os.WriteFile(in, []byte("@@0.0.0.0 exception-hosts.example\\n@@127.0.0.1 exception-hosts2.example\\n@@::1 exception-hosts3.example\\n"), 0o644); err != nil {
+	if err := os.WriteFile(in, []byte("@@0.0.0.0 exception-hosts.example\n@@127.0.0.1 exception-hosts2.example\n@@::1 exception-hosts3.example\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
