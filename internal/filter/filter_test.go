@@ -48,6 +48,23 @@ func optimizeRules(t *testing.T, rules []string) ([]string, int) {
 	return strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"), result.Duplicates
 }
 
+func TestHostsEntryRequiresExactlyOneSpace(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rejected.txt")
+	input := "0.0.0.0 ads.example\n0.0.0.0  ads.example\n0.0.0.0\tads.example\n0.0.0.0 ads.example extra\n"
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, st := readRules(t, in, rej)
+	if len(rules) != 1 || rules[0] != "||ads.example^" {
+		t.Fatalf("rules=%v, want one normalized hosts rule", rules)
+	}
+	if st.Rejected != 3 {
+		t.Fatalf("rejected=%d, want 3", st.Rejected)
+	}
+}
+
 func TestBuilderAndOptimizer(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")

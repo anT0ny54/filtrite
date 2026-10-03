@@ -39,11 +39,12 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 	if err := os.MkdirAll(filepath.Dir(rejectedPath), 0o755); err != nil {
 		return Stats{}, fmt.Errorf("create rejected report directory: %w", err)
 	}
-	rej, err := os.Create(rejectedPath)
+	rejFile, err := os.Create(rejectedPath)
 	if err != nil {
 		return Stats{}, fmt.Errorf("create rejected report: %w", err)
 	}
-	defer rej.Close()
+	defer rejFile.Close()
+	rej := bufio.NewWriterSize(rejFile, 64<<10)
 
 	if _, err := fmt.Fprintln(rej, "# line\treason\trule"); err != nil {
 		return Stats{}, fmt.Errorf("write rejected report header: %w", err)
@@ -76,6 +77,9 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 	if err := sc.Err(); err != nil {
 		return stats, fmt.Errorf("scan %s: %w", input, err)
 	}
+	if err := rej.Flush(); err != nil {
+		return stats, fmt.Errorf("write rejected report: %w", err)
+	}
 	return stats, nil
 }
 
@@ -98,18 +102,22 @@ func normalize(line string) (string, string, bool) {
 	if !utf8.ValidString(line) {
 		return "", "invalid-utf8", false
 	}
-	for _, marker := range []string{
-		"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
-		"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
-	} {
-		if strings.Contains(line, marker) {
-			return "", "unsupported-cosmetic-scriptlet", false
+	// Every cosmetic/scriptlet marker contains one of these three bytes.
+	// Avoid the full marker scan for the overwhelmingly common network-rule case.
+	if strings.ContainsAny(line, "#+:") {
+		for _, marker := range []string{
+			"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
+			"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
+		} {
+			if strings.Contains(line, marker) {
+				return "", "unsupported-cosmetic-scriptlet", false
+			}
 		}
 	}
 	if len(line) >= 2 && line[0] == '/' && line[len(line)-1] == '/' {
 		return "", "regex-filter", false
 	}
-	if strings.HasPrefix(strings.ToLower(line), "[adblock") {
+	if len(line) >= 8 && strings.EqualFold(line[:8], "[adblock") {
 		return "", "metadata", false
 	}
 
@@ -132,9 +140,9 @@ func normalize(line string) (string, string, bool) {
 			if exception {
 				return "", "unsupported-exception-rule", false
 			}
-			fields := strings.Fields(line)
-			if len(fields) == 2 && validDomain(fields[1]) {
-				return "||" + strings.ToLower(fields[1]) + "^", "", true
+			host := strings.TrimPrefix(line, prefix)
+			if host != "" && !strings.ContainsAny(host, " \t") && validDomain(host) {
+				return "||" + strings.ToLower(host) + "^", "", true
 			}
 			return "", "invalid-host-entry", false
 		}
@@ -189,16 +197,13 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		case "":
 			return "", "unterminated-host-rule", false
 		}
-		if !validPath(rest) {
-			return "", "", false
-		}
 		return "||" + strings.ToLower(host) + rest + modSuffix, "", true
 	}
 
 	if strings.HasPrefix(pattern, "|https://") || strings.HasPrefix(pattern, "|http://") {
 		hasEnd := strings.HasSuffix(pattern, "|")
 		plain := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
-		if strings.ContainsAny(plain, " \t<>\\") {
+		if strings.ContainsAny(plain, "<>\\") {
 			return "", "", false
 		}
 		schemeEnd := strings.Index(plain, "://") + 3
@@ -442,15 +447,6 @@ func canonicalDomainList(value string) (string, bool) {
 	return strings.Join(out, "|"), true
 }
 
-func validPath(s string) bool {
-	for _, r := range s {
-		if r < 0x21 || r > 0x7e {
-			return false
-		}
-	}
-	return true
-}
-
 func validDomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
@@ -458,7 +454,7 @@ func validDomain(s string) bool {
 	// Empty labels (leading/trailing dot, "..") fail the per-label length
 	// check below; the character check rejects "/?#^|" and anything else
 	// outside [A-Za-z0-9-] once lower-cased.
-	parts := strings.Split(strings.ToLower(s), ".")
+	parts := strings.Split(s, ".")
 	if len(parts) < 2 {
 		return false
 	}
@@ -470,7 +466,7 @@ func validDomain(s string) bool {
 		for _, r := range part {
 			switch {
 			case r >= '0' && r <= '9':
-			case (r >= 'a' && r <= 'z') || r == '-':
+			case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-':
 				allNumeric = false
 			default:
 				return false
