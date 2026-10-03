@@ -48,6 +48,7 @@ BEGIN{bad=0}
 
   if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else if(line~/^@@\|https?:\/\// || line~/^\|https?:\/\//){next} else {print "unsupported prefix: " NR;bad=1;next}
   host=x;sub(/[\/?#\^|].*$/,"",host)
+  if(!exception && dollar==0 && line ~ /^\|\|[A-Za-z0-9.-]+\^$/){print "missing third-party guard: " NR;bad=1}
   if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}
 }
 END{exit bad}
