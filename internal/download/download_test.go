@@ -2,7 +2,10 @@ package download
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -25,6 +29,7 @@ func TestRetryableClassification(t *testing.T) {
 		{name: "http 429", err: &statusError{Code: 429, Status: "429 Too Many Requests"}, want: true},
 		{name: "http 503", err: &statusError{Code: 503, Status: "503 Service Unavailable"}, want: true},
 		{name: "http 404", err: &statusError{Code: 404, Status: "404 Not Found"}, want: false},
+		{name: "request deadline", err: context.DeadlineExceeded, want: true},
 		{name: "too large", err: ErrTooLarge, want: false},
 		{name: "plain error", err: errors.New("disk full"), want: false},
 	}
@@ -189,6 +194,89 @@ func TestAllDownloadsAndRetries(t *testing.T) {
 		t.Fatalf("unexpected body %q", b)
 	}
 }
+
+func TestPerRequestTimeoutIsRetried(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := calls.Add(1)
+		if n == 1 {
+			time.Sleep(50 * time.Millisecond)
+			return
+		}
+		_, _ = w.Write([]byte("||retry.example^\n"))
+	}))
+	defer srv.Close()
+
+	dir := t.TempDir()
+	res, err := AllWithCache(context.Background(), []string{srv.URL}, dir, "", 1, 1, 10*time.Millisecond)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("server calls=%d, want 2 after per-request timeout retry", calls.Load())
+	}
+	if res[0].Err != nil {
+		t.Fatalf("result error=%v", res[0].Err)
+	}
+}
+
+func TestRetryableConnectionReset(t *testing.T) {
+	if !retryable(syscall.ECONNRESET) {
+		t.Fatal("ECONNRESET should be retryable")
+	}
+}
+
+func TestGetReportsActualAttemptsAndStatusOnce(t *testing.T) {
+	srv := httptest.NewServer(http.NotFoundHandler())
+	defer srv.Close()
+
+	_, _, err := get(context.Background(), newClient(time.Second), srv.URL, t.TempDir(), 4, ptrInt64(MaxTotalBytes))
+	if err == nil {
+		t.Fatal("expected HTTP error")
+	}
+	if !strings.Contains(err.Error(), "after 1 attempts") {
+		t.Fatalf("error=%q, want actual attempt count", err)
+	}
+	if strings.Contains(err.Error(), "404 404 Not Found") {
+		t.Fatalf("error=%q, status code duplicated", err)
+	}
+	if !strings.Contains(err.Error(), "404 Not Found") {
+		t.Fatalf("error=%q, want HTTP status", err)
+	}
+}
+
+func TestCachedBytesConsumeManifestBudget(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	dir := filepath.Join(root, "out")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	urls := make([]string, 0, 11)
+	for i := 0; i < 11; i++ {
+		u := fmt.Sprintf("https://cached-%d.example/list.txt", i)
+		urls = append(urls, u)
+		sum := sha256.Sum256([]byte(u))
+		path := filepath.Join(cacheDir, hex.EncodeToString(sum[:])+".txt")
+		file, err := os.Create(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(50 << 20); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := AllWithCache(context.Background(), urls, dir, cacheDir, 1, 0, time.Second)
+	if err == nil || !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err=%v, want cached bytes to exceed manifest budget", err)
+	}
+}
+
+func ptrInt64(v int64) *int64 { return &v }
 
 func TestBudgetReaderAllowsExactEOF(t *testing.T) {
 	var remaining int64 = 3

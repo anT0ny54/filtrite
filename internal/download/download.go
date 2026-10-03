@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 )
 
@@ -169,17 +170,25 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	results := make([]Result, len(urls))
 	budget := MaxTotalBytes
 
-	// Cached files are returned immediately and do not consume the network
-	// download budget because they were already accounted for when written.
+	// Cached files count toward the manifest budget just like fresh downloads.
 	missing := make([]job, 0, len(urls))
 	for i, rawURL := range urls {
 		if cacheDir != "" {
 			if path, n, ok := cachedFile(cacheDir, rawURL); ok {
-				results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true}
+				if atomic.AddInt64(&budget, -n) < 0 {
+					results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true, Err: ErrTooLarge}
+				} else {
+					results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true}
+				}
 				continue
 			}
 		}
 		missing = append(missing, job{index: i, url: rawURL})
+	}
+	for _, result := range results {
+		if result.Err != nil {
+			return results, errors.Join(fmt.Errorf("%s: %w", result.URL, result.Err))
+		}
 	}
 	if len(missing) == 0 {
 		return results, nil
@@ -257,7 +266,9 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 
 func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
 	var last error
+	attempts := 0
 	for attempt := 0; attempt <= retries; attempt++ {
+		attempts = attempt + 1
 		if attempt > 0 {
 			delay := time.Duration(500*(1<<min(attempt-1, 5))) * time.Millisecond
 			var status *statusError
@@ -282,11 +293,17 @@ func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget
 			return p, n, nil
 		}
 		last = e
+		// Only the caller's context cancellation/deadline is fatal. A
+		// per-request Client.Timeout also wraps DeadlineExceeded, but is a
+		// transient mirror/network failure and must remain retryable.
+		if ctx.Err() != nil {
+			return "", 0, ctx.Err()
+		}
 		if !retryable(e) {
 			break
 		}
 	}
-	return "", 0, fmt.Errorf("after %d attempts: %w", retries+1, last)
+	return "", 0, fmt.Errorf("after %d attempts: %w", attempts, last)
 }
 
 func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) (string, int64, error) {
@@ -428,7 +445,7 @@ type statusError struct {
 }
 
 func (e *statusError) Error() string {
-	return "unexpected HTTP status: " + strconv.Itoa(e.Code) + " " + e.Status
+	return "unexpected HTTP status: " + e.Status
 }
 
 func parseRetryAfter(value string, now time.Time) time.Duration {
@@ -452,7 +469,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	return 0
 }
 func retryable(err error) bool {
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrTooLarge) {
+	if errors.Is(err, ErrTooLarge) {
 		return false
 	}
 	var s *statusError
@@ -465,6 +482,11 @@ func retryable(err error) bool {
 	}
 	// Server closed the connection before/without a response.
 	if errors.Is(err, io.EOF) {
+		return true
+	}
+	// Connection resets are transient and commonly happen with overloaded
+	// mirrors or reused connections.
+	if errors.Is(err, syscall.ECONNRESET) {
 		return true
 	}
 	var netErr net.Error
