@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -97,7 +96,7 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 				fmt.Fprintf(os.Stderr, "WARNING: source %s failed: %v\n", result.URL, result.Err)
 			}
 		}
-		if errors.Is(downloadErr, context.Canceled) || errors.Is(downloadErr, context.DeadlineExceeded) {
+		if ctx.Err() != nil {
 			return fmt.Errorf("source download canceled: %w", downloadErr)
 		}
 		if !allowPartial {
