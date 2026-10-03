@@ -26,7 +26,7 @@ The generated `filters/<name>.txt` files are deliberately **not** the output of 
 - `||host^` and `||host/path...` network rules.
 - `@@` network exceptions using the same supported network syntax.
 - Fully anchored `|http://...` and `|https://...` network rules, including `@@` exceptions.
-- Hosts-file entries using `0.0.0.0`, `127.0.0.1`, or `::1` followed by exactly one hostname.
+- Hosts-file entries using `0.0.0.0`, `127.0.0.1`, or `::1` followed by **one ASCII space and exactly one hostname**. Tabs, multiple separators, and trailing fields/comments are rejected.
 - These rule modifiers, matching exactly what Chromium's legacy `rule_parser` accepts ([`rule_parser.cc`](https://chromium.googlesource.com/chromium/src/+/1d0244ea5b870edebab547606aa19d4594ce1de5/components/subresource_filter/tools/rule_parser/rule_parser.cc)):
   - `$third-party` / `$~third-party`
   - `$match-case`
@@ -34,7 +34,7 @@ The generated `filters/<name>.txt` files are deliberately **not** the output of 
   - Resource-type (`ElementType`) filters — `script`, `image`, `stylesheet`, `object`, `xmlhttprequest`, `object-subrequest`, `subdocument`, `ping`, `media`, `font`, `websocket`, `other` — each optionally negated with `~` (e.g. `$script,image` or `$~image,~stylesheet`). `popup` is rejected because the legacy indexed engine strips popup element types. **A single rule must use one sign only**: Chromium's parser decides whether the unspecified types start out included or excluded based on the *first* type's sign, so mixing `script,~image` in one rule is order-dependent and is rejected rather than guessed at.
   - Whitelist-only (`ActivationType`) filters — `document`, `genericblock` — only on `@@` exception rules, never negated (e.g. `@@||example.com^$document`). CSS-related `elemhide` and `generichide` are rejected because the legacy indexed engine removes those activation bits. These activation filters can't be combined with resource-type filters in the same rule.
 
-Modifier duplicates and conflicts are rejected rather than resolved implicitly. Domain lists are validated and canonicalized into Chromium's deterministic ordering — longest domain first, then lexicographically within equal-length groups. Because Chromium's parser stores first/third-party state, case sensitivity, resource type, activation type, and initiator-domain constraints as distinct rule metadata, none of these scopes are collapsed together.
+Hostnames are ASCII-only and canonicalized to lower case. IP literals, single-label hosts, underscores, ports, and IDN/non-ASCII hosts are rejected; URL paths retain their original case. Modifier duplicates and conflicts are rejected rather than resolved implicitly. Domain lists are validated and canonicalized into Chromium's deterministic ordering — longest domain first, then lexicographically within equal-length groups. Because Chromium's parser stores first/third-party state, case sensitivity, resource type, activation type, and initiator-domain constraints as distinct rule metadata, none of these scopes are collapsed together.
 
 ### Rejected
 
@@ -46,7 +46,7 @@ This is intentional: a rule is either safely representable in the target engine 
 
 Bare domain blocks such as `||example.com^` are emitted as `||example.com^$third-party`.
 
-This is not an arbitrary optimization. Chromium's own filter-list generation script applies the same transformation to prevent an unconditional domain rule from also matching a top-level navigation to that domain.
+This is not an arbitrary optimization. Chromium's own filter-list generation script applies the same transformation to prevent an unconditional domain rule from also matching a top-level navigation to that domain. The builder applies the guard during normalization, and `scripts/validate.sh` enforces that generated bare `||host^` rules are never emitted without `$third-party`.
 
 Other metadata-scoped rules are **not** removed merely because a broader host rule exists. For example, `$domain=...` and `$~third-party` can have different matching scope and therefore cannot safely be treated as redundant.
 
@@ -62,13 +62,13 @@ Every file matching `lists/*.txt` is an independent source manifest; the default
 
 Source URLs must be valid **HTTPS URLs without embedded credentials**. Invalid entries fail the build with a line-numbered error instead of being silently skipped.
 
-The downloader also enforces per-source (50 MiB) and combined per-manifest (500 MiB) download-size limits, a 100-source cap per manifest, 8 parallel workers, bounded retries with `Retry-After` support, follows a small bounded number of redirects, refuses HTTPS→HTTP downgrade redirects, rejects obvious HTML error pages, and preserves source result order for deterministic reporting.
+The downloader uses a **2-minute per-request timeout**, up to **4 retries** with **0.5 s, 1 s, 2 s, 4 s, 8 s, and 16 s maximum exponential backoff** as applicable (with `Retry-After` honored and capped at 2 minutes). It retries transient HTTP failures (408, 429, 5xx), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall build deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes. At most 100 sources are accepted and 8 workers are used. Redirects are limited to 5 hops, HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
 
 The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
 
 All configured source downloads are release-critical by default. If any source fails, `legacy-filter-builder` refuses to publish a partial ruleset. This prevents a transient mirror failure from silently reducing a release. For an explicitly intentional partial build, pass `--allow-partial`; cancellation and timeout remain fatal.
 
-When multiple manifests contain the same source URL, a shared cache directory can reuse the already downloaded file so the URL is fetched only once during that build.
+When multiple manifests contain the same source URL, a shared cache directory can reuse the already downloaded file so the URL is fetched only once during that build. Source-cache entries never expire automatically; `build.sh` removes the cache at the start of each build.
 
 ## 🧾 Multiple named lists
 
@@ -91,7 +91,9 @@ GitHub disables scheduled workflows after 60 days without repository activity. T
 Requirements:
 
 - Go 1.27.1+ for this source tree.
-- `curl`, `unzip`, and `sha256sum` (the last only when `CONVERTER_SHA256` is set).
+- Bash 4+, `awk`, and `mktemp`.
+- `curl` and `unzip` only when `deps/ruleset_converter` is absent.
+- `sha256sum` only when `CONVERTER_SHA256` is set.
 - A Linux-compatible `ruleset_converter` binary is downloaded automatically on the first `build.sh` run and cached in `deps/`.
 
 Run:
@@ -104,9 +106,11 @@ Outputs (per list `<name>`, see "Multiple named lists" below):
 
 ```text
 filters/<name>.txt
+build/work/<name>/build-summary.env
 build/work/<name>/rejected-*.txt
 build/work/<name>/ruleset-converter.log
 dist/<name>.dat
+build/release-summary.md
 ```
 
 With only the default `lists/adblock.txt`, that's `filters/adblock.txt`, `build/work/adblock/rejected-*.txt`, `build/work/adblock/ruleset-converter.log`, and `dist/adblock.dat`.
@@ -135,7 +139,7 @@ Override the location with `CONVERTER_URL=<https url>`, and pin the archive with
 
 `build.sh` checks every generated `dist/<name>.dat` against a **20 MiB default limit** and prints a warning (without failing the build) when it is exceeded. Override the ceiling with `MAX_RULESET_BYTES=<bytes>`.
 
-`filtrite` (the converter wrapper) takes `--input`, `--output`, `--converter`, `--log`, and `--timeout` (default 5 minutes). `legacy-filter-builder` takes `--sources`, `--custom`, `--output`, `--build-dir`, `--cache-dir`, `--summary` (key=value file that `build.sh` reads for the sources configured/succeeded/cached counts), `--allow-partial`, and `--sort-chunk-bytes`.
+`filtrite` (the converter wrapper) takes `--input`, `--output`, `--converter`, `--log`, and `--timeout` (default 5 minutes). `legacy-filter-builder` takes `--sources`, `--custom`, `--output`, `--build-dir`, `--cache-dir`, `--summary`, `--allow-partial`, and `--sort-chunk-bytes`. The summary is a key=value file containing `sources_configured`, `sources_succeeded`, and `sources_cached`; `build.sh` consumes only the first two, while `sources_cached` is available to other tooling.
 
 The legacy-filter builder uses an **8 MiB default in-memory sort chunk**. For larger-memory environments, increase it with `--sort-chunk-bytes <bytes>` to reduce temporary chunk-file I/O; the default is retained for low-memory CI/build hosts.
 
@@ -147,9 +151,7 @@ Run the text-level sanity check on a generated list with:
 ./scripts/validate.sh filters/adblock.txt
 ```
 
-`build.sh` already runs this on every list it builds; the direct invocation is for checking a single `filters/<name>.txt` on its own.
-
-The final authority remains Chromium's `ruleset_converter`, which is executed by `build.sh` after the text builder completes. Chromium's documented conversion command is the same `filter-list` → `unindexed-ruleset` path used here.
+`build.sh` runs this on every generated list before invoking the converter. The validator checks whitespace, cosmetic/scriptlet/regex syntax, the supported modifier subset, hostname shape, and the required `$third-party` guard on bare `||host^` rules. It does not fully emulate Chromium's parser; the final authority remains Chromium's `ruleset_converter`, which is executed by `build.sh` after the text builder completes.
 
 Unit tests:
 
