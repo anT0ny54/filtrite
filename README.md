@@ -46,13 +46,15 @@ This is intentional: a rule is either safely representable in the target engine 
 
 Bare domain blocks such as `||example.com^` are emitted as `||example.com^$third-party`.
 
-This is not an arbitrary optimization. Chromium's own filter-list generation script applies the same transformation to prevent an unconditional domain rule from also matching a top-level navigation to that domain. The builder applies the guard during normalization, and `scripts/validate.sh` enforces that generated bare `||host^` rules are never emitted without `$third-party`.
+This is not an arbitrary optimization. Chromium's own filter-list generation script applies the same transformation to prevent an unconditional domain rule from also matching a top-level navigation to that domain. The builder applies the guard when streaming rules into the external sorter (`ExternalSorter.Add`), and `scripts/validate.sh` enforces that generated bare `||host^` rules are never emitted without `$third-party`.
 
 Other metadata-scoped rules are **not** removed merely because a broader host rule exists. For example, `$domain=...` and `$~third-party` can have different matching scope and therefore cannot safely be treated as redundant.
 
 ## Rejected-rule reports
 
 Every build writes `build/work/<name>/rejected-*.txt` reports for each list `<name>` (see "Multiple named lists" below). Each report contains the original source line number, rejection reason, and sanitized original rule so unsupported syntax is auditable rather than silently discarded.
+
+Comment lines starting with `!` and blank lines are skipped without being reported. Lines starting with `#` (hosts-file comments) are not treated as comments and show up as rejections. A single source line longer than 2 MiB aborts the build with a scan error rather than being skipped.
 
 Each report starts with a `# line<TAB>reason<TAB>rule` header. Report files are named `rejected-<hash>.txt` — one per source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`.
 
@@ -62,7 +64,7 @@ Every file matching `lists/*.txt` is an independent source manifest; the default
 
 Source URLs must be valid **HTTPS URLs without embedded credentials**, with no leading/trailing whitespace. Invalid entries fail the build with a line-numbered error instead of being silently skipped. Duplicate URLs (compared after lower-casing the host) are collapsed into one.
 
-The downloader uses a **2-minute per-request timeout** and up to **4 retries** (5 attempts per source) with exponential backoff of **0.5 s, 1 s, 2 s, and 4 s** (`Retry-After` is honored and capped at 2 minutes). All downloads for one list share an overall **15-minute deadline** hardcoded in `cmd/legacy-filter-builder`; a source still failing after its attempts is release-fatal unless `--allow-partial` is set, while the deadline expiring is always fatal. It retries transient HTTP failures (408, 429, 500, 502, 503, 504; other statuses such as 404 or 501 are not retried), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes. At most 100 sources are accepted and 8 workers are used. Redirects are limited to 5 hops, HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
+The downloader uses a **2-minute per-request timeout** and up to **4 retries** (5 attempts per source) with exponential backoff of **0.5 s, 1 s, 2 s, and 4 s** (`Retry-After` is honored and capped at 2 minutes). All downloads for one list share an overall **15-minute deadline** hardcoded in `cmd/legacy-filter-builder`; a source still failing after its attempts is release-fatal unless `--allow-partial` is set, while the deadline expiring is always fatal. It retries transient HTTP failures (408, 429, 500, 502, 503, 504; other statuses such as 404 or 501 are not retried), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes. At most 100 sources are accepted and up to 8 workers are used (never more than the number of sources still to download). Redirects are limited to 4 hops (the redirect guard counts the initial request, so a 5th hop is refused), HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
 
 The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
 
@@ -109,12 +111,16 @@ build/legacy-filter-builder
 build/filtrite
 deps/ruleset_converter            (downloaded once, then cached)
 filters/<name>.txt
+build/source-cache/                 (shared downloaded source snapshots, one file per URL)
+build/work/<name>/raw/              (created empty; snapshots live in build/source-cache/ whenever --cache-dir is set)
 build/work/<name>/build-summary.env
 build/work/<name>/rejected-*.txt
 build/work/<name>/ruleset-converter.log
 dist/<name>.dat
 build/release-summary.md
 ```
+
+`build.sh` always passes `--cache-dir build/source-cache`, so downloads are written there and `build/work/<name>/raw/` stays empty. Only when `legacy-filter-builder` is run by hand without `--cache-dir` are the snapshots written into `raw/`. The sorter's temporary `build/work/<name>/sort/` directory is removed when the builder exits.
 
 With only the default `lists/adblock.txt`, that's `filters/adblock.txt`, `build/work/adblock/rejected-*.txt`, `build/work/adblock/ruleset-converter.log`, and `dist/adblock.dat`.
 
@@ -144,7 +150,7 @@ Override the location with `CONVERTER_URL=<https url>`, and pin the archive with
 
 `filtrite` (the converter wrapper) takes `--input`, `--output`, `--converter`, `--log`, and `--timeout` (default 5 minutes). `legacy-filter-builder` takes `--sources`, `--custom`, `--output`, `--build-dir`, `--cache-dir`, `--summary`, `--allow-partial`, and `--sort-chunk-bytes`. The summary is a key=value file containing `sources_configured`, `sources_succeeded`, and `sources_cached`; `build.sh` consumes only the first two, while `sources_cached` is available to other tooling.
 
-The legacy-filter builder uses an **8 MiB default in-memory sort chunk**. For larger-memory environments, increase it with `--sort-chunk-bytes <bytes>` to reduce temporary chunk-file I/O; the default is retained for low-memory CI/build hosts.
+The legacy-filter builder uses an **8 MiB default in-memory sort chunk**, measured as the bytes of rule text (plus one newline per rule); Go string headers and slice overhead are not counted, so real memory use is somewhat higher. For larger-memory environments, increase it with `--sort-chunk-bytes <bytes>` to reduce temporary chunk-file I/O; the default is retained for low-memory CI/build hosts.
 
 ## ✅ Validation
 
@@ -161,6 +167,8 @@ Unit tests:
 ```sh
 go test ./...
 ```
+
+Generated directories (`build/`, `deps/`, `dist/`, `filters/`) are listed in `.gitignore`, so they are not committed by accident. See [`CHANGELOG.md`](CHANGELOG.md) for notable changes.
 
 ## 📦 Bromite / legacy-engine usage
 
