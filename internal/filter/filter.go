@@ -276,9 +276,6 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 	activationSeen := make(map[string]struct{}, 4)
 	var activationNames []string
 
-	usingElementType := false
-	usingActivationType := false
-
 	for _, token := range strings.Split(opts, ",") {
 		if token == "" {
 			return "", false
@@ -301,7 +298,7 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			// Values aren't valid on ElementType options, and mixing them
 			// with ActivationType options in the same rule isn't a pattern
 			// real filter lists use, so it's rejected rather than guessed at.
-			if hasValue || usingActivationType {
+			if hasValue || len(activationNames) > 0 {
 				return "", false
 			}
 			if _, exists := typeSeen[name]; exists {
@@ -315,12 +312,11 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			}
 			typeSeen[name] = struct{}{}
 			typeNames = append(typeNames, name)
-			usingElementType = true
 			continue
 		}
 
 		if _, ok := activationTypeOptions[name]; ok {
-			if hasValue || negated || usingElementType || !exception {
+			if hasValue || negated || len(typeNames) > 0 || !exception {
 				return "", false
 			}
 			if _, exists := activationSeen[name]; exists {
@@ -328,7 +324,6 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			}
 			activationSeen[name] = struct{}{}
 			activationNames = append(activationNames, name)
-			usingActivationType = true
 			continue
 		}
 
@@ -396,9 +391,8 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 	if domains != "" {
 		parts = append(parts, "domain="+domains)
 	}
-	if len(parts) == 0 {
-		return "", false
-	}
+	// opts is non-empty and every token either appends a part or returns
+	// early, so parts is never empty here.
 	return "$" + strings.Join(parts, ","), true
 }
 
