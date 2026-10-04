@@ -188,6 +188,10 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if len(missing) == 0 {
 		return results, nil
 	}
+	// Never start more workers than there are downloads left to do.
+	if workers > len(missing) {
+		workers = len(missing)
+	}
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
