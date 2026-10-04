@@ -42,11 +42,9 @@ type Result struct {
 	Cached bool
 }
 
-type client struct{ http *http.Client }
-
-func newClient(timeout time.Duration) *client {
+func newClient(timeout time.Duration) *http.Client {
 	tr := &http.Transport{Proxy: http.ProxyFromEnvironment, MaxIdleConns: 32, MaxIdleConnsPerHost: 8, MaxConnsPerHost: 8, IdleConnTimeout: 30 * time.Second, TLSHandshakeTimeout: 15 * time.Second, ResponseHeaderTimeout: 30 * time.Second, ForceAttemptHTTP2: true}
-	return &client{http: &http.Client{
+	return &http.Client{
 		Transport: tr, Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) >= MaxRedirects {
@@ -60,7 +58,7 @@ func newClient(timeout time.Duration) *client {
 			}
 			return nil
 		},
-	}}
+	}
 }
 
 func URLsFromFile(path string) ([]string, error) {
@@ -144,9 +142,6 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if len(urls) > MaxSources {
 		return nil, fmt.Errorf("too many sources")
 	}
-	if workers > len(urls) {
-		workers = len(urls)
-	}
 	if deadline, ok := ctx.Deadline(); ok {
 		// Each attempt can take up to `timeout`; cap retries so the
 		// worst-case total attempt time fits inside the caller's deadline
@@ -161,7 +156,7 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	}
 
 	c := newClient(timeout)
-	defer c.http.CloseIdleConnections()
+	defer c.CloseIdleConnections()
 	type job struct {
 		index int
 		url   string
@@ -187,20 +182,12 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	}
 	for _, result := range results {
 		if result.Err != nil {
-			return results, errors.Join(fmt.Errorf("%s: %w", result.URL, result.Err))
+			return results, fmt.Errorf("%s: %w", result.URL, result.Err)
 		}
 	}
 	if len(missing) == 0 {
 		return results, nil
 	}
-	// Re-cap after subtracting cache hits: a manifest that is mostly cached
-	// (the common case on a second build.sh list) should not spin up a full
-	// worker pool sized for every URL when only a handful still need a
-	// network round trip.
-	if workers > len(missing) {
-		workers = len(missing)
-	}
-
 	var wg sync.WaitGroup
 	wg.Add(workers)
 	for i := 0; i < workers; i++ {
@@ -264,7 +251,7 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 	return path, info.Size(), true
 }
 
-func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
+func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
 	var last error
 	attempts := 0
 	for attempt := 0; attempt <= retries; attempt++ {
@@ -306,14 +293,14 @@ func get(ctx context.Context, c *client, rawURL, dir string, retries int, budget
 	return "", 0, fmt.Errorf("after %d attempts: %w", attempts, last)
 }
 
-func getOnce(ctx context.Context, c *client, rawURL, dir string, budget *int64) (string, int64, error) {
+func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *int64) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", 0, err
 	}
 	req.Header.Set("Accept", "text/plain, text/*;q=0.9, */*;q=0.1")
 	req.Header.Set("User-Agent", "filtrite/4.0 (legacy-subresource-filter-builder)")
-	resp, err := c.http.Do(req)
+	resp, err := c.Do(req)
 	if err != nil {
 		return "", 0, err
 	}

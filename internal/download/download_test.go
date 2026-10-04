@@ -124,8 +124,8 @@ func TestClientRedirectGuardsHTTPSSources(t *testing.T) {
 		target = "http://example.com/plain.txt"
 
 		c := newClient(5 * time.Second)
-		c.http.Transport = srv.Client().Transport
-		_, err := c.http.Get(srv.URL + "/")
+		c.Transport = srv.Client().Transport
+		_, err := c.Get(srv.URL + "/")
 		if err == nil || !strings.Contains(err.Error(), "HTTPS downgrade") {
 			t.Fatalf("redirect error=%v, want HTTPS downgrade rejection", err)
 		}
@@ -150,8 +150,8 @@ func TestClientRedirectGuardsHTTPSSources(t *testing.T) {
 		target = u.String()
 
 		c := newClient(5 * time.Second)
-		c.http.Transport = srv.Client().Transport
-		_, err = c.http.Get(srv.URL + "/")
+		c.Transport = srv.Client().Transport
+		_, err = c.Get(srv.URL + "/")
 		if err == nil || !strings.Contains(err.Error(), "embedded credentials") {
 			t.Fatalf("redirect error=%v, want embedded-credentials rejection", err)
 		}
