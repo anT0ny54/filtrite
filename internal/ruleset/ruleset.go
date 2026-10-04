@@ -87,7 +87,7 @@ func Convert(ctx context.Context, o Options) error {
 		return err
 	}
 	outDir := filepath.Dir(o.Output) // never empty: "." for a bare filename
-	if err := os.MkdirAll(outDir, 0755); err != nil {
+	if err := os.MkdirAll(outDir, 0o755); err != nil {
 		return err
 	}
 	tmp, err := os.CreateTemp(outDir, "."+filepath.Base(o.Output)+".tmp-*")
