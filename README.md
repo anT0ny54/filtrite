@@ -15,7 +15,7 @@ Chromium documents this `ruleset_converter` flow for development/testing of cust
 
 With only the default `lists/adblock.txt` present, `<name>` is `adblock`, so the build produces `filters/adblock.txt` as an intermediate text artifact and `dist/adblock.dat` as the release artifact. `dist/adblock.dat`'s path is unchanged from earlier versions of this project.
 
-Generated `filters/`, `dist/`, and `build/` content is cleaned at the start of every build. The release workflow publishes the matching `dist/<name>.dat` files and no redundant root-level `filters.txt` copy.
+At the start of every build, `build.sh` deletes `filters/`, `dist/`, `build/work/`, and `build/source-cache/` and truncates `build/release-summary.md`; the compiled helper binaries in `build/` and the cached `deps/ruleset_converter` are kept (the binaries are simply rebuilt). The release workflow publishes the matching `dist/<name>.dat` files and no redundant root-level `filters.txt` copy.
 
 ## 🧩 Legacy filter syntax policy
 
@@ -54,15 +54,15 @@ Other metadata-scoped rules are **not** removed merely because a broader host ru
 
 Every build writes `build/work/<name>/rejected-*.txt` reports for each list `<name>` (see "Multiple named lists" below). Each report contains the original source line number, rejection reason, and sanitized original rule so unsupported syntax is auditable rather than silently discarded.
 
-Report files are named `rejected-<hash>.txt` — one per source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`.
+Each report starts with a `# line<TAB>reason<TAB>rule` header. Report files are named `rejected-<hash>.txt` — one per source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`.
 
 ## 🌐 Source lists
 
 Every file matching `lists/*.txt` is an independent source manifest; the default is [`lists/adblock.txt`](lists/adblock.txt). Each manifest is a simple URL-per-line file; blank lines and `#` comments are ignored.
 
-Source URLs must be valid **HTTPS URLs without embedded credentials**. Invalid entries fail the build with a line-numbered error instead of being silently skipped.
+Source URLs must be valid **HTTPS URLs without embedded credentials**, with no leading/trailing whitespace. Invalid entries fail the build with a line-numbered error instead of being silently skipped. Duplicate URLs (compared after lower-casing the host) are collapsed into one.
 
-The downloader uses a **2-minute per-request timeout**, up to **4 retries** with **0.5 s, 1 s, 2 s, 4 s, 8 s, and 16 s maximum exponential backoff** as applicable (with `Retry-After` honored and capped at 2 minutes). It retries transient HTTP failures (408, 429, 5xx), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall build deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes. At most 100 sources are accepted and 8 workers are used. Redirects are limited to 5 hops, HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
+The downloader uses a **2-minute per-request timeout** and up to **4 retries** (5 attempts per source) with exponential backoff of **0.5 s, 1 s, 2 s, and 4 s** (`Retry-After` is honored and capped at 2 minutes). All downloads for one list share an overall **15-minute deadline** hardcoded in `cmd/legacy-filter-builder`; a source still failing after its attempts is release-fatal unless `--allow-partial` is set, while the deadline expiring is always fatal. It retries transient HTTP failures (408, 429, 500, 502, 503, 504; other statuses such as 404 or 501 are not retried), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes. At most 100 sources are accepted and 8 workers are used. Redirects are limited to 5 hops, HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
 
 The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
 
@@ -77,14 +77,14 @@ When multiple manifests contain the same source URL, a shared cache directory ca
 To add another list (e.g. a smaller or region-specific one), drop a new manifest next to the default one:
 
 ```sh
-lists/adblock.txt   -> filters/adblock.txt , dist/adblock.dat   (default, always present)
+lists/adblock.txt   -> filters/adblock.txt , dist/adblock.dat   (default, shipped with the repo)
 lists/german.txt    -> filters/german.txt  , dist/german.dat
 lists/minimal.txt   -> filters/minimal.txt , dist/minimal.dat
 ```
 
 Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project.
 
-GitHub disables scheduled workflows after 60 days without repository activity. To prevent that, `.github/workflows/Keep-Alive.yml` runs on the 1st and 15th of each month (03:17 UTC) and commits a timestamp to `.github/keep-alive.txt` (`[skip ci]`, so it does not trigger a build).
+GitHub disables scheduled workflows after 60 days without repository activity; the daily 03:17 UTC build described under "Supply-chain and maintenance notes" is subject to that policy. This repository does not currently ship a keep-alive workflow to prevent it.
 
 ## 🛠️ Build
 
@@ -105,6 +105,9 @@ Run:
 Outputs (per list `<name>`, see "Multiple named lists" below):
 
 ```text
+build/legacy-filter-builder
+build/filtrite
+deps/ruleset_converter            (downloaded once, then cached)
 filters/<name>.txt
 build/work/<name>/build-summary.env
 build/work/<name>/rejected-*.txt
@@ -180,7 +183,7 @@ Keep custom rules within the supported syntax policy above. A rule that is usefu
 
 Third-party filter sources keep their own licenses and terms. Do not assume that the MIT license covering this repository also licenses the downloaded filter content.
 
-The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
+The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building (Go module caching is disabled because the module has no dependencies and no `go.sum`) and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
 
 ## 📄 License
 

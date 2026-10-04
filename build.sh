@@ -115,6 +115,8 @@ for manifest in "${manifests[@]}"; do
     --cache-dir build/source-cache \
     --summary "$summary_file"
 
+  # Clear values from the previous list so a missing key can never reuse them.
+  unset sources_configured sources_succeeded sources_cached
   # shellcheck disable=SC1090
   source "$summary_file"
   configured_count="${sources_configured:-0}"
