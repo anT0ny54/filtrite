@@ -91,11 +91,13 @@ func optimizeRule(rule string) string {
 }
 
 func isBareDomainBlock(rule string) bool {
-	if !strings.HasPrefix(rule, "||") || len(rule) <= 3 || !strings.HasSuffix(rule, "^") {
+	if !strings.HasPrefix(rule, "||") || !strings.HasSuffix(rule, "^") {
 		return false
 	}
+	// validDomain already rejects every separator character (/?#^|), so the
+	// host slice is validated directly without a redundant character scan.
 	host := rule[2 : len(rule)-1]
-	return !strings.ContainsAny(host, "/?#^|$") && validDomain(host)
+	return validDomain(host)
 }
 
 func normalize(line string) (string, string, bool) {
@@ -453,7 +455,7 @@ func validDomain(s string) bool {
 	}
 	// Empty labels (leading/trailing dot, "..") fail the per-label length
 	// check below; the character check rejects "/?#^|" and anything else
-	// outside [A-Za-z0-9-] once lower-cased.
+	// outside [A-Za-z0-9-] (case is preserved here; callers lower-case).
 	parts := strings.Split(s, ".")
 	if len(parts) < 2 {
 		return false

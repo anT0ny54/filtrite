@@ -509,9 +509,9 @@ func TestFullyAnchoredURLRules(t *testing.T) {
 func TestFullyAnchoredURLHostCasingDeduplicates(t *testing.T) {
 	// Two sources shipping the same fully-anchored rule with different host
 	// casing must normalize to the same string and collapse to one rule.
-	// ReadFile dedups on the normalized string as it reads, so this already
-	// happens before Optimize ever sees the rules; Optimize is idempotent on
-	// the result either way.
+	// ReadFileToSink does not deduplicate: both rules are streamed to the
+	// sink with the host lower-cased, and the external sorter then collapses
+	// them into a single output line.
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
 	rej := filepath.Join(dir, "rej.txt")
