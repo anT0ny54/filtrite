@@ -49,6 +49,9 @@ jobs:
           chmod +x build.sh scripts/validate.sh
           ./build.sh
 
+      - name: Validator regression tests
+        run: bash scripts/validate_test.sh
+
       - name: Generate tag name
         run: echo "TAG_NAME=$(date +%F-%H-%M-%S)" >> "$GITHUB_ENV"
 
