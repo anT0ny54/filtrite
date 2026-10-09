@@ -86,7 +86,11 @@ lists/minimal.txt   -> filters/minimal.txt , dist/minimal.dat
 
 Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project.
 
-GitHub disables scheduled workflows after 60 days without repository activity; the daily 03:17 UTC build described under "Supply-chain and maintenance notes" is subject to that policy. This repository does not currently ship a keep-alive workflow to prevent it.
+### Keep-alive workflow
+
+GitHub disables scheduled workflows after 60 days without repository activity, which would silently stop the daily 03:17 UTC build described under "Supply-chain and maintenance notes". To prevent that, `.github/workflows/Keep-Alive.yml` ("Keep Fork Alive") runs at 03:17 UTC on the **1st and 15th of each month** (and on manual dispatch). It rewrites `.github/keep-alive.txt` with a UTC timestamp and pushes a `chore: update repository keep-alive [skip ci]` commit to the branch it ran on; the `[skip ci]` marker keeps these commits from triggering extra builds.
+
+The workflow needs the `contents: write` permission (declared in the workflow itself) so it can push that commit. Runs are serialized (`cancel-in-progress: false`) and time out after 5 minutes. If you fork this repository and your organization restricts the default `GITHUB_TOKEN` to read-only, allow workflow write access under *Settings -> Actions -> General -> Workflow permissions*, or the keep-alive push will fail and scheduled builds can still be disabled after 60 days of inactivity.
 
 ## 🛠️ Build
 
@@ -162,11 +166,21 @@ Run the text-level sanity check on a generated list with:
 
 `build.sh` runs this on every generated list before invoking the converter. The validator checks whitespace, cosmetic/scriptlet/regex syntax, the supported modifier subset, hostname shape, and the required `$third-party` guard on bare `||host^` rules. It does not fully emulate Chromium's parser; the final authority remains Chromium's `ruleset_converter`, which is executed by `build.sh` after the text builder completes.
 
+The shell validator is deliberately a line-local sanity check rather than a second copy of the Go parser (`internal/filter/filter.go` remains the single source of normalization logic). Regression tests keep it honest:
+
+```sh
+./scripts/validate_test.sh
+```
+
+This feeds known-good and known-malformed generated rules through `validate.sh`. When `deps/ruleset_converter` exists (after `./build.sh`), every rule the validator accepts is also run through the real converter, so the validator cannot drift into accepting rules Chromium rejects. The CI workflow runs it after the build.
+
 Unit tests:
 
 ```sh
 go test ./...
 ```
+
+The download tests cover cancellation and deadline handling for fully cached manifests, and concurrent/failure-path accounting of the shared byte budget (`go test -race ./internal/download/` is recommended when touching that code).
 
 Generated directories (`build/`, `deps/`, `dist/`, `filters/`) are listed in `.gitignore`, so they are not committed by accident. See [`CHANGELOG.md`](CHANGELOG.md) for notable changes.
 
@@ -193,28 +207,33 @@ Third-party filter sources keep their own licenses and terms. Do not assume that
 
 The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building (Go module caching is disabled because the module has no dependencies and no `go.sum`) and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
 
-## 📄 License
+## 🌐 Free DNS Services
+
+High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
+
+| Blocklist | DNS-over-HTTPS (DoH) |
+| :--- | :--- |
+| Multi Pro + TIF | `https://freedns.koyeb.app/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns.mydoh.workers.dev/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dns-pi.vercel.app/api/doh/dns-query` (Recommended) |
+| Multi Pro + TIF | `https://dnssix.netlify.app/api/doh/dns-query` |
+| Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
+| Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
+
+## ⚡ Bandwidth Hero Server
+
+A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
+
+Bandwidth Hero Server fetches remote images, compresses them on the fly, and delivers optimized versions to the client. This significantly reduces data consumption while improving page load performance.
+
+🖥️ **Live Demo:** [Bandwidth Hero](https://bhserv.netlify.app/).
+
+## Supporting the Project
+
+If you find this project useful, donations are appreciated:
+
+- **Bitcoin**: `1HntwKxyqGCfnSGvGLMUTRAqLnTvLarAQP`
+
+## License
 
 See [`LICENSE`](LICENSE).
-
-## 🔗 Other projects by the maintainer
-
-These are unrelated to the filter-list compiler above but are run by the same maintainer.
-
-**My Free DNS** — DNS-over-HTTPS resolvers using HaGeZi Blocklists Multi Pro + TIF:
-
-| Service | DNS-over-HTTPS URL |
-| --- | --- |
-| Multi Pro + TIF (Recommended) | `https://freedns.koyeb.app/dns-query` |
-| Multi Pro + TIF (Recommended) | `https://dns-pi.vercel.app/api/doh/dns-query` |
-| Multi Pro + TIF (Backup) | `https://dnssix.netlify.app/api/doh/dns-query` |
-| Multi Pro + TIF (Recommended, but will sleep if not use in 15 minute) | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
-| Multi Pro + TIF (Recommended, but will sleep if not use in 15 minute) | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
-
-**Bandwidth Hero Server** — a lightweight image proxy that fetches remote images, compresses them, and returns optimized versions for faster loading and lower data use: https://bhserv.netlify.app/
-
-## 💜 Support this project
-
-If you'd like to support development, consider donating:
-
-**Bitcoin:** `1HntwKxyGCfnSGvGLMUTRAqLnTvLarAQP`
