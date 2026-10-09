@@ -12,19 +12,11 @@ BEGIN{bad=0}
   if($0~/\+js\(|:has-text\(|:contains\(|:matches-css\(|:xpath\(|:style\(/){print "scriptlet/procedural: " NR;bad=1}
   if($0~/^\/.*\/$/){print "regex: " NR;bad=1}
 
-  # Secondary sanity check for the modifier subset emitted by filter.go:
-  #   - third-party / ~third-party, match-case, domain=...
-  #   - resource-type (ElementType) keywords, each optionally negated with
-  #     "~" (filter.go only ever emits a single sign per rule, but this
-  #     check is line-local and does not re-derive that invariant here;
-  #     Chromium ruleset_converter remains the authoritative final parser)
-  #   - whitelist-only (ActivationType) keywords: document, genericblock
-  #     (never negated; CSS-related activation types and popup are rejected)
+  # Secondary sanity check for the modifier subset emitted by filter.go.
   line=$0
   exception=0
   if(line~/^@@/) exception=1
   dollar=0
-  # Position of the last "$" (same split point as filter.go).
   if(match(line,/\$[^$]*$/)) dollar=RSTART
   if(dollar>0){
     mods=substr(line,dollar+1)
@@ -36,7 +28,6 @@ BEGIN{bad=0}
       ntypes=0;nact=0;neg=0;pos=0
       for(j=1;j<=n;j++){
         p=parts[j]
-        # Name without the "~" sign or "=value", used for duplicate detection.
         name=p;sub(/^~/,"",name);sub(/=.*$/,"",name)
         if(name in seen){print "duplicate/conflicting modifier: " NR;bad=1}
         seen[name]=1
@@ -72,7 +63,42 @@ BEGIN{bad=0}
     }
   }
 
-  if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else if(line~/^@@\|https?:\/\// || line~/^\|https?:\/\//){next} else {print "unsupported prefix: " NR;bad=1;next}
+  # Fully anchored URLs need their own checks before the early exit: validate
+  # scheme, URL character set, percent escapes, authority, and hostname.
+  if(line~/^@@\|https?:\/\// || line~/^\|https?:\/\//){
+    url=line
+    if(url~/^@@\|/) url=substr(url,4)
+    else url=substr(url,2)
+
+    # Deliberately accept a conservative ASCII URL subset only. This catches
+    # malformed schemes/authorities and URL delimiters the legacy parser
+    # cannot represent safely.
+    if(url!~/^https?:\/\/[A-Za-z0-9.-]+([\/?#][A-Za-z0-9._~!$&()*+,;=:@%\/?#-]*)?$/){
+      print "malformed anchored URL: " NR;bad=1;next
+    }
+    if(url~/%([^0-9A-Fa-f]|$)|%[0-9A-Fa-f]([^0-9A-Fa-f]|$)/){
+      print "bad percent escape in anchored URL: " NR;bad=1;next
+    }
+
+    authority=url
+    sub(/^https?:\/\//,"",authority)
+    host=authority
+    sub(/[\/?#].*$/,"",host)
+    if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){
+      print "bad host: " NR;bad=1;next
+    }
+    if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1;next}
+    if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1;next}
+    nlabels=split(host,labels,".")
+    for(k=1;k<=nlabels;k++){
+      if(labels[k]!~/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/){
+        print "bad hostname label: " NR;bad=1;break
+      }
+    }
+    next
+  }
+
+  if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else {print "unsupported prefix: " NR;bad=1;next}
   host=x;sub(/[\/?#\^|].*$/,"",host)
   if(!exception && dollar==0 && line ~ /^\|\|[A-Za-z0-9.-]+\^$/){print "missing third-party guard: " NR;bad=1}
   if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}

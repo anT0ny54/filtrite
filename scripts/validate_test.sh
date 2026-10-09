@@ -1,15 +1,7 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/validate.sh.
-#
-# Every ACCEPT case must pass the validator; every REJECT case must fail it.
-# When deps/ruleset_converter exists (it does after ./build.sh), each ACCEPT
-# case is also fed to the real converter, so the validator can never drift
-# into accepting a rule that Chromium rejects. REJECT cases are not required
-# to be rejected by the converter: the validator is intentionally stricter
-# than Chromium where this project's policy demands it (e.g. mixed-sign
-# resource types, see README "Legacy filter syntax policy").
-#
-# Usage: scripts/validate_test.sh [path/to/ruleset_converter]
+# Every ACCEPT case must pass; every REJECT case must fail.
+# If deps/ruleset_converter exists, accepted cases are also checked by it.
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,42 +20,53 @@ accept=(
   '@@||example.com^$document'
   '@@||example.com^$document,genericblock'
   '|https://example.com/ads'
+  '|http://example.com'
+  '@@|https://example.com/ads?x=1&y=two'
 )
 
 reject=(
-  # Missing third-party guard on a bare domain block.
   '||example.com^'
-  # Duplicate or conflicting modifiers.
   '||example.com^$script,image,script'
   '||example.com^$third-party,~third-party'
   '||example.com^$match-case,match-case'
   '||example.com^$domain=a.com,domain=b.com'
-  # Mixed-sign resource types are order-dependent in Chromium's parser.
   '||example.com^$script,~image'
-  # Activation types: exception-only, never combined with resource types.
   '||example.com^$document'
   '@@||example.com^$document,script'
-  # Malformed domain= lists.
   '||example.com^$domain=a.com||b.com'
   '||example.com^$domain=|a.com'
   '||example.com^$domain=a.com|a.com'
   '||example.com^$domain=a.com|~a.com'
   '||example.com^$domain=A.com'
   '||example.com^$domain=localhost'
-  # Unsupported or empty modifiers.
   '||example.com^$popup'
   '||example.com^$third-party,'
   '||example.com^$'
-  # Host shape.
   '||1.2.3.4^$third-party'
   '||Example.com^$third-party'
   '||exa_mple.com^$third-party'
   '||example.com:8080^$third-party'
   '||localhost^$third-party'
-  # Unsupported syntax classes.
   'example.com##.ad'
   '/regex/'
   '||example.com^ $third-party'
+
+  # Fully anchored URL regressions: hostname, port, and syntax must be checked
+  # for both blocking rules and exception rules.
+  '|https://bad_host.example/x'
+  '@@|https://bad_host.example/x'
+  '|https://example.com:443/x'
+  '@@|https://example.com:443/x'
+  '|https:///missing-host'
+  '@@|https:///missing-host'
+  '|ftp://example.com/x'
+  '@@|ftp://example.com/x'
+  '|https://example.com/%ZZ'
+  '@@|https://example.com/%2G'
+  '|https://-bad.example/x'
+  '@@|https://bad-.example/x'
+  '|https://127.0.0.1/x'
+  '@@|https://127.0.0.1/x'
 )
 
 fail=0
