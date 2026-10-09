@@ -119,6 +119,11 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	// Honor cancellation and expired deadlines up front so behavior does not
+	// depend on whether the sources happen to be cached.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if workers <= 0 {
 		workers = DefaultWorkers
 	}
@@ -186,6 +191,17 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 	}
 	if len(missing) == 0 {
+		// An all-cached build never reaches the worker loop, so re-check the
+		// context here; otherwise a cancellation or deadline that fired while
+		// the cache was being scanned would be silently ignored.
+		if err := ctx.Err(); err != nil {
+			for i := range results {
+				if results[i].Err == nil {
+					results[i].Err = err
+				}
+			}
+			return results, err
+		}
 		return results, nil
 	}
 	// Never start more workers than there are downloads left to do.
