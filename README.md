@@ -116,7 +116,7 @@ build/filtrite
 deps/ruleset_converter            (downloaded once, then cached)
 filters/<name>.txt
 build/source-cache/                 (shared downloaded source snapshots, one file per URL)
-build/work/<name>/raw/              (created empty; snapshots live in build/source-cache/ whenever --cache-dir is set)
+build/work/<name>/raw/              (only when the builder runs without --cache-dir)
 build/work/<name>/build-summary.env
 build/work/<name>/rejected-*.txt
 build/work/<name>/ruleset-converter.log
@@ -124,7 +124,7 @@ dist/<name>.dat
 build/release-summary.md
 ```
 
-`build.sh` always passes `--cache-dir build/source-cache`, so downloads are written there and `build/work/<name>/raw/` stays empty. Only when `legacy-filter-builder` is run by hand without `--cache-dir` are the snapshots written into `raw/`. The sorter's temporary `build/work/<name>/sort/` directory is removed when the builder exits.
+`build.sh` always passes `--cache-dir build/source-cache`, so downloads are written there and `build/work/<name>/raw/` is never created. Only when `legacy-filter-builder` is run by hand without `--cache-dir` is `raw/` created and the snapshots written into it. The sorter's temporary `build/work/<name>/sort/` directory is removed when the builder exits.
 
 With only the default `lists/adblock.txt`, that's `filters/adblock.txt`, `build/work/adblock/rejected-*.txt`, `build/work/adblock/ruleset-converter.log`, and `dist/adblock.dat`.
 
@@ -165,6 +165,8 @@ Run the text-level sanity check on a generated list with:
 ```
 
 `build.sh` runs this on every generated list before invoking the converter. The validator checks whitespace, cosmetic/scriptlet/regex syntax, the supported modifier subset, hostname shape, and the required `$third-party` guard on bare `||host^` rules. It does not fully emulate Chromium's parser; the final authority remains Chromium's `ruleset_converter`, which is executed by `build.sh` after the text builder completes.
+
+The anchored-URL character set the validator enforces is the same conservative printable-ASCII subset (`anchoredURLChars` in `internal/filter/filter.go`) the Go normalizer applies, so the two stages cannot drift apart on which anchored rules are legal.
 
 The shell validator is deliberately a line-local sanity check rather than a second copy of the Go parser (`internal/filter/filter.go` remains the single source of normalization logic). Regression tests keep it honest:
 
@@ -207,7 +209,11 @@ Third-party filter sources keep their own licenses and terms. Do not assume that
 
 The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building (Go module caching is disabled because the module has no dependencies and no `go.sum`) and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
 
-## 🌐 Free DNS Services
+## 🔗 Related projects (not part of this repository)
+
+The services below are maintained separately and are **not** part of this repository, its build pipeline, or its release cycle. They are listed here for convenience only.
+
+### 🌐 Free DNS Services
 
 High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 
@@ -220,7 +226,7 @@ High-performance DNS utilizing HaGeZi Blocklists (Multi Pro + TIF).
 | Multi Pro + TIF | `https://dns-93aca.containers.snapdeploy.app/dns-query` |
 | Multi Pro + TIF | `https://doh-93aca.containers.snapdeploy.app/dns-query` |
 
-## ⚡ Bandwidth Hero Server
+### ⚡ Bandwidth Hero Server
 
 A lightweight image optimization proxy designed to slash bandwidth usage and accelerate web browsing.
 

@@ -63,6 +63,11 @@ if [[ ! -x deps/ruleset_converter ]]; then
   }
   unzip -oqj "$tmp" "${converter_entries[0]}" -d deps
   chmod +x deps/ruleset_converter
+
+  # The EXIT trap only covers this download block; disarm it here instead of
+  # leaking it to the end of the script.
+  trap - EXIT
+  rm -f "$tmp"
 fi
 
 [[ -x deps/ruleset_converter ]] || {
@@ -70,17 +75,25 @@ fi
   exit 1
 }
 
+# Build both helpers concurrently. Go's build cache still compiles the
+# shared internal packages only once, and linking two small binaries in
+# parallel beats building them back to back.
+build_pids=()
 go build \
   -trimpath \
   -ldflags='-s -w' \
   -o build/legacy-filter-builder \
-  ./cmd/legacy-filter-builder
-
+  ./cmd/legacy-filter-builder &
+build_pids+=($!)
 go build \
   -trimpath \
   -ldflags='-s -w' \
   -o build/filtrite \
-  ./cmd/filtrite
+  ./cmd/filtrite &
+build_pids+=($!)
+for build_pid in "${build_pids[@]}"; do
+  wait "$build_pid"
+done
 
 custom=custom-rules.txt
 [[ -f "$custom" ]] || custom=""
