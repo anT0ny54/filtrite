@@ -8,8 +8,13 @@ BEGIN{bad=0}
   sub(/\r$/,"")
   if($0==""||$0~/^!/)next
   if($0~/[[:space:]]/){print "whitespace: " NR;bad=1}
-  if($0~/##|#@#|#\?#|#\$#|#%#|#\^#|#@%\?#/){print "cosmetic: " NR;bad=1}
-  if($0~/\+js\(|:has-text\(|:contains\(|:matches-css\(|:xpath\(|:style\(/){print "scriptlet/procedural: " NR;bad=1}
+
+  # Cosmetic and scriptlet markers are matched as literal strings (index),
+  # not regexes, so no ERE metacharacter escaping is involved and behavior
+  # cannot differ between awk implementations. Mirrors the marker list in
+  # internal/filter/filter.go.
+  if(index($0,"##")||index($0,"#@#")||index($0,"#?#")||index($0,"#$#")||index($0,"#%#")||index($0,"#^#")||index($0,"#@%?#")){print "cosmetic: " NR;bad=1}
+  if(index($0,"+js(")||index($0,":has-text(")||index($0,":contains(")||index($0,":matches-css(")||index($0,":xpath(")||index($0,":style(")){print "scriptlet/procedural: " NR;bad=1}
   if($0~/^\/.*\/$/){print "regex: " NR;bad=1}
 
   # Secondary sanity check for the modifier subset emitted by filter.go.
@@ -64,15 +69,15 @@ BEGIN{bad=0}
   }
 
   # Fully anchored URLs need their own checks before the early exit: validate
-  # scheme, URL character set, percent escapes, authority, and hostname.
+  # scheme, URL character set, percent escapes, authority, and hostname. The
+  # URL character class is the single source of truth shared with
+  # anchoredURLChars in internal/filter/filter.go; both sides must stay
+  # identical so the Go stage can never emit a rule this validator rejects.
   if(line~/^@@\|https?:\/\// || line~/^\|https?:\/\//){
     url=line
     if(url~/^@@\|/) url=substr(url,4)
     else url=substr(url,2)
 
-    # Deliberately accept a conservative ASCII URL subset only. This catches
-    # malformed schemes/authorities and URL delimiters the legacy parser
-    # cannot represent safely.
     if(url!~/^https?:\/\/[A-Za-z0-9.-]+([\/?#][A-Za-z0-9._~!$&()*+,;=:@%\/?#-]*)?$/){
       print "malformed anchored URL: " NR;bad=1;next
     }
@@ -100,7 +105,15 @@ BEGIN{bad=0}
 
   if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else {print "unsupported prefix: " NR;bad=1;next}
   host=x;sub(/[\/?#\^|].*$/,"",host)
-  if(!exception && dollar==0 && line ~ /^\|\|[A-Za-z0-9.-]+\^$/){print "missing third-party guard: " NR;bad=1}
+
+  # Bare-domain block without the $third-party guard the Go parser always
+  # emits. The hostname shape mirrors validDomain in internal/filter: at
+  # least two lower-case labels with proper label boundaries (generated
+  # output is already canonicalized), excluding all-numeric/IP-literal hosts.
+  if(!exception && dollar==0 \
+     && line ~ /^\|\|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\^$/ \
+     && line !~ /^\|\|[0-9.]+\^$/){print "missing third-party guard: " NR;bad=1}
+
   if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}
   else if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1}
   else if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1}

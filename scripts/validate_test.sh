@@ -67,6 +67,21 @@ reject=(
   '@@|https://bad-.example/x'
   '|https://127.0.0.1/x'
   '@@|https://127.0.0.1/x'
+
+  # Anchored-URL tail character set: the validator must reject exactly the
+  # characters internal/filter/filter.go (anchoredURLChars) rejects, so a
+  # rule the Go stage emits can never fail validation and abort a release.
+  '|https://example.com/a"b'
+  '@@|https://example.com/a"b'
+  "|https://example.com/a'b"
+  '|https://example.com/page[1].html'
+  '|https://example.com/page{1}.html'
+  '|https://example.com/a^b'
+  '|https://example.com/a|b'
+  '|https://example.com/a\\b'
+  '|https://example.com/a%2'
+  '|https://example.com/a%zz'
+  '@@|https://example.com/a%2G'
 )
 
 fail=0
