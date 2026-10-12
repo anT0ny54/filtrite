@@ -25,7 +25,7 @@ The generated `filters/<name>.txt` files are deliberately **not** the output of 
 
 - `||host^` and `||host/path...` network rules.
 - `@@` network exceptions using the same supported network syntax.
-- Fully anchored `|http://...` and `|https://...` network rules, including `@@` exceptions.
+- Fully anchored `|http://...` and `|https://...` network rules, including `@@` exceptions. A single trailing `|` (end-of-URL anchor, e.g. `|https://example.com/ads.js|`) is accepted; the URL tail may only use the conservative character set described under "Validation".
 - Hosts-file entries using `0.0.0.0`, `127.0.0.1`, or `::1` followed by **one ASCII space and exactly one hostname**. Tabs, multiple separators, and trailing fields/comments are rejected.
 - These rule modifiers, matching exactly what Chromium's legacy `rule_parser` accepts ([`rule_parser.cc`](https://chromium.googlesource.com/chromium/src/+/1d0244ea5b870edebab547606aa19d4594ce1de5/components/subresource_filter/tools/rule_parser/rule_parser.cc)):
   - `$third-party` / `$~third-party`
@@ -56,7 +56,7 @@ Every build writes `build/work/<name>/rejected-*.txt` reports for each list `<na
 
 Comment lines starting with `!` and blank lines are skipped without being reported. Lines starting with `#` (hosts-file comments) are not treated as comments and show up as rejections. A single source line longer than 2 MiB aborts the build with a scan error rather than being skipped.
 
-Each report starts with a `# line<TAB>reason<TAB>rule` header. Report files are named `rejected-<hash>.txt` — one per source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`.
+Each report starts with a `# line<TAB>reason<TAB>rule` header. A failure to write, flush, or close a report file fails the build. Report files are named `rejected-<hash>.txt` — one per successfully downloaded source URL, where `<hash>` is the first 12 hex characters of the SHA-256 of that URL — plus `rejected-custom.txt` for `custom-rules.txt`, which is only written when that file exists and is non-empty.
 
 ## 🌐 Source lists
 
@@ -64,7 +64,7 @@ Every file matching `lists/*.txt` is an independent source manifest; the default
 
 Source URLs must be valid **HTTPS URLs without embedded credentials**, with no leading/trailing whitespace. Invalid entries fail the build with a line-numbered error instead of being silently skipped. Duplicate URLs (compared after lower-casing the host) are collapsed into one.
 
-The downloader uses a **2-minute per-request timeout** and up to **4 retries** (5 attempts per source) with exponential backoff of **0.5 s, 1 s, 2 s, and 4 s** (`Retry-After` is honored and capped at 2 minutes). All downloads for one list share an overall **15-minute deadline** hardcoded in `cmd/legacy-filter-builder`; a source still failing after its attempts is release-fatal unless `--allow-partial` is set, while the deadline expiring is always fatal. It retries transient HTTP failures (408, 429, 500, 502, 503, 504; other statuses such as 404 or 501 are not retried), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes; if cached sources alone exhaust the manifest budget, the sources that were never fetched are reported as failed (so `--allow-partial` cannot count them as successes). At most 100 sources are accepted and up to 8 workers are used (never more than the number of sources still to download). Redirects are limited to 4 hops (the redirect guard counts the initial request, so a 5th hop is refused), HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
+The downloader uses a **2-minute per-request timeout** and up to **4 retries** (5 attempts per source) with exponential backoff of **0.5 s, 1 s, 2 s, and 4 s** (`Retry-After` is honored and capped at 2 minutes). All downloads for one list share an overall **15-minute deadline** hardcoded in `cmd/legacy-filter-builder`; the number of attempts per source is reduced if needed so that worst-case attempt time (attempts × the per-request timeout) fits inside the remaining deadline. A source still failing after its attempts is release-fatal unless `--allow-partial` is set, while the deadline expiring is always fatal. It retries transient HTTP failures (408, 429, 500, 502, 503, 504; other statuses such as 404 or 501 are not retried), request/network timeouts, unexpected EOF/connection closure, and `ECONNRESET`; caller cancellation and the overall deadline are not retried. Each source is capped at 50 MiB and each manifest at 500 MiB, including cached bytes; if cached sources alone exhaust the manifest budget, the sources that were never fetched are reported as failed (so `--allow-partial` cannot count them as successes). At most 100 sources are accepted and up to 8 workers are used (never more than the number of sources still to download). Redirects are limited to 4 hops (the redirect guard counts the initial request, so a 5th hop is refused), HTTPS→HTTP downgrades and credential-bearing redirects are refused, obvious HTML error pages are rejected, and source result order is preserved for deterministic reporting.
 
 The production builder uses an external merge sort with an 8 MiB default in-memory chunk size. That trades some temporary disk I/O for substantially lower peak RAM when large filter collections are processed.
 
@@ -85,12 +85,6 @@ lists/minimal.txt   -> filters/minimal.txt , dist/minimal.dat
 ```
 
 Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS URL per line, `#` comments and blank lines ignored. This mirrors the one-file-per-list convention used by the original [xarantolus/filtrite](https://github.com/xarantolus/filtrite) project.
-
-### Keep-alive workflow
-
-GitHub disables scheduled workflows after 60 days without repository activity, which would silently stop the daily 03:17 UTC build described under "Supply-chain and maintenance notes". To prevent that, `.github/workflows/Keep-Alive.yml` ("Keep Fork Alive") runs at 03:17 UTC on the **1st and 15th of each month** (and on manual dispatch). It rewrites `.github/keep-alive.txt` with a UTC timestamp and pushes a `chore: update repository keep-alive [skip ci]` commit to the branch it ran on; the `[skip ci]` marker keeps these commits from triggering extra builds.
-
-The workflow needs the `contents: write` permission (declared in the workflow itself) so it can push that commit. Runs are serialized (`cancel-in-progress: false`) and time out after 5 minutes. If you fork this repository and your organization restricts the default `GITHUB_TOKEN` to read-only, allow workflow write access under *Settings -> Actions -> General -> Workflow permissions*, or the keep-alive push will fail and scheduled builds can still be disabled after 60 days of inactivity.
 
 ## 🛠️ Build
 
@@ -166,7 +160,7 @@ Run the text-level sanity check on a generated list with:
 
 `build.sh` runs this on every generated list before invoking the converter. The validator checks whitespace, cosmetic/scriptlet/regex syntax, the supported modifier subset, hostname shape, and the required `$third-party` guard on bare `||host^` rules. It does not fully emulate Chromium's parser; the final authority remains Chromium's `ruleset_converter`, which is executed by `build.sh` after the text builder completes.
 
-The anchored-URL character set the validator enforces is the same conservative printable-ASCII subset (`anchoredURLChars` in `internal/filter/filter.go`) the Go normalizer applies, so the two stages cannot drift apart on which anchored rules are legal.
+The anchored-URL character set the validator enforces is the same conservative printable-ASCII subset (`anchoredURLChars` in `internal/filter/filter.go`) the Go normalizer applies, so the two stages cannot drift apart on which anchored rules are legal. Both treat exactly one trailing `|` as the end-of-URL anchor (not part of the URL); a second trailing `|` or a `|` anywhere inside the URL is rejected.
 
 The shell validator is deliberately a line-local sanity check rather than a second copy of the Go parser (`internal/filter/filter.go` remains the single source of normalization logic). Regression tests keep it honest:
 
@@ -207,7 +201,13 @@ Keep custom rules within the supported syntax policy above. A rule that is usefu
 
 Third-party filter sources keep their own licenses and terms. Do not assume that the MIT license covering this repository also licenses the downloaded filter content.
 
-The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building (Go module caching is disabled because the module has no dependencies and no `go.sum`) and validates every generated list. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
+The build workflow (`.github/workflows/build.yml`) runs `go test ./...` before building (Go module caching is disabled because the module has no dependencies and no `go.sum`), runs `build.sh` (which validates every generated list), and then runs `scripts/validate_test.sh` against the freshly downloaded converter. It runs daily at 03:17 UTC, on manual dispatch, and on pushes to `main` that touch `lists/*.txt`, `custom-rules.txt`, `cmd/**`, `internal/**`, `build.sh`, `scripts/**`, `go.mod`, or the workflow itself. Runs are serialized (`cancel-in-progress: false`) so a release in progress is never cancelled. Each run publishes every `dist/*.dat` as a new timestamp-tagged release (body from `build/release-summary.md`) and keeps only the latest 2 releases. Source-download failures are release-fatal unless a caller explicitly uses the builder's `--allow-partial` option outside the release workflow.
+
+### Keep-alive workflow
+
+GitHub disables scheduled workflows after 60 days without repository activity, which would silently stop the daily 03:17 UTC build described above. To prevent that, `.github/workflows/Keep-Alive.yml` ("Keep Fork Alive") runs at 03:17 UTC on the **1st and 15th of each month** (and on manual dispatch). It rewrites `.github/keep-alive.txt` with a UTC timestamp and pushes a `chore: update repository keep-alive [skip ci]` commit to the branch it ran on. That file is not in the build workflow's `paths` filter, and pushes made with the default `GITHUB_TOKEN` do not start new workflow runs anyway, so these commits do not trigger extra builds (the `[skip ci]` marker is an additional safeguard).
+
+The workflow needs the `contents: write` permission (declared in the workflow itself) so it can push that commit. Runs are serialized (`cancel-in-progress: false`) and time out after 5 minutes. If you fork this repository and your organization restricts the default `GITHUB_TOKEN` to read-only, allow workflow write access under *Settings -> Actions -> General -> Workflow permissions*, or the keep-alive push will fail and scheduled builds can still be disabled after 60 days of inactivity.
 
 ## 🔗 Related projects (not part of this repository)
 
