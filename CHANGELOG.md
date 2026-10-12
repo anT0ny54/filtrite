@@ -22,6 +22,21 @@ All notable changes to this project are documented in this file.
 - `legacy-filter-builder`: `--sort-chunk-bytes <= 0` is rejected by both
   `run()` and `filter.NewExternalSorter` (the sorter previously coerced it
   silently to the default — a conflicting policy).
+- `internal/download.AllWithCache` no longer creates the per-caller staging
+  directory when a shared cache is configured. The builder's own guard only
+  covered half the path: the download package's unconditional
+  `os.MkdirAll(dir)` recreated `build/work/<name>/raw/` for every
+  cache-enabled build, contradicting the documented behavior.
+- `legacy-filter-builder`: `run()` now creates the build directory itself
+  before writing the `--summary` file. It previously relied on the download
+  package's (now removed) side effect of creating `<buildDir>/raw/`, which
+  would have broken summary writes for cache-enabled builds.
+- `build.sh`: both parallel Go helper builds are always waited on and both
+  exit statuses are collected before the script fails; the first failure no
+  longer aborts under `set -e` and leaves the other build uncollected.
+- `build.sh`: a generated `dist/<name>.dat` over `MAX_RULESET_BYTES` now
+  aborts the build with a nonzero exit status, and the oversized artifact is
+  deleted before exiting, so an over-limit ruleset can never be published.
 
 ### Changed
 - `legacy-filter-builder` no longer recreates the empty
@@ -31,8 +46,21 @@ All notable changes to this project are documented in this file.
   output (it was previously written but never read).
 - The worker job channel in `AllWithCache` is buffered to the exact job
   count; the cached-error scan is skipped when no cache directory is used.
-- README: removed off-topic sections (Free DNS Services, Bandwidth Hero
-  Server, donations).
+- `ExternalSorter.Finish` merges sort chunks with a bounded fan-in
+  (256 chunks per pass). Inputs whose chunk count exceeds the fan-in merge
+  in multi-pass rounds instead of opening every chunk simultaneously, so
+  peak file-descriptor usage stays constant for unusually large rule sets.
+  Intermediate rounds sort-merge only (no deduplication): duplicates can
+  span rounds, so only the final pass collapses them, keeping the output and
+  the duplicate count bit-identical to a single-pass merge.
+- The builder's `--summary` file now also reports `rules_read`,
+  `rules_rejected`, `rules_duplicates`, and `rules_output` for per-list
+  effectiveness measurement, and is written only on success so a failed
+  build never leaves stale counters behind.
+
+### Added
+- Regression test `TestRunWithCacheDoesNotCreateRawDir`: a cache-enabled
+  build must never create `build/work/<name>/raw/`.
 
 ### Removed
 - Dead `.gitattributes` rules for `*.py`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`,
@@ -48,6 +76,9 @@ All notable changes to this project are documented in this file.
   preserved, not rewritten.
 - `build.sh`, `scripts/validate.sh`, and `scripts/validate_test.sh` are
   committed with the executable bit; the CI `chmod` workaround was removed.
+- The 20 MiB `MAX_RULESET_BYTES` ceiling is a release requirement, not a
+  recommendation: exceeding it fails the build. Set `MAX_RULESET_BYTES`
+  explicitly when intentionally shipping a larger ruleset.
 
 ## Current release behavior (as built by `./build.sh`)
 
@@ -65,14 +96,15 @@ All notable changes to this project are documented in this file.
   header, one report per source URL by short URL hash, plus
   `rejected-custom.txt`).
 - Accepted rules stream through an external merge sort (8 MiB default
-  in-memory chunk, tunable via `--sort-chunk-bytes`); duplicates collapse
+  in-memory chunk, tunable via `--sort-chunk-bytes`, bounded 256-way merge
+  fan-in with multi-pass rounds for very large inputs); duplicates collapse
   during the merge. Bare `||host^` rules gain the `$third-party` guard at
   sorter ingestion.
 - `scripts/validate.sh` sanity-checks every generated list before `filtrite`
   runs Chromium's `ruleset_converter`
   (`--input_format=filter-list --output_format=unindexed-ruleset`); a
-  `dist/<name>.dat` over 20 MiB (override with `MAX_RULESET_BYTES`) prints a
-  warning.
+  `dist/<name>.dat` over 20 MiB (override with `MAX_RULESET_BYTES`) fails
+  the build and the oversized artifact is deleted.
 - `.github/workflows/build.yml` runs daily at 03:17 UTC, is serialized, and
   keeps the latest 2 releases; `Keep-Alive.yml` rewrites
   `.github/keep-alive.txt` on the 1st and 15th of each month so the schedule

@@ -77,7 +77,10 @@ fi
 
 # Build both helpers concurrently. Go's build cache still compiles the
 # shared internal packages only once, and linking two small binaries in
-# parallel beats building them back to back.
+# parallel beats building them back to back. Both exit statuses are
+# collected: the first failure must not leave the other build uncollected
+# (a bare `wait` under `set -e` would exit immediately), so wait for every
+# PID and only then fail.
 build_pids=()
 go build \
   -trimpath \
@@ -91,9 +94,16 @@ go build \
   -o build/filtrite \
   ./cmd/filtrite &
 build_pids+=($!)
+build_status=0
 for build_pid in "${build_pids[@]}"; do
-  wait "$build_pid"
+  if ! wait "$build_pid"; then
+    build_status=1
+  fi
 done
+if (( build_status != 0 )); then
+  echo "ERROR: one or both Go helper builds failed" >&2
+  exit 1
+fi
 
 custom=custom-rules.txt
 [[ -f "$custom" ]] || custom=""
@@ -147,13 +157,18 @@ for manifest in "${manifests[@]}"; do
 
   ruleset_bytes="$(wc -c < "dist/$name.dat")"
 
+  # The 20 MiB ceiling is a release requirement, not a recommendation:
+  # remove the oversized artifact and abort so an over-limit ruleset can
+  # never be published, even by a caller that ignores the exit status.
   if (( ruleset_bytes > MAX_RULESET_BYTES )); then
+    rm -f "dist/$name.dat"
     printf \
-      'WARNING: dist/%s.dat is %d bytes, over the %d-byte limit; trim lists/%s.txt\n' \
+      'ERROR: dist/%s.dat is %d bytes, over the %d-byte release limit; trim lists/%s.txt or raise MAX_RULESET_BYTES\n' \
       "$name" \
       "$ruleset_bytes" \
       "$MAX_RULESET_BYTES" \
       "$name" >&2
+    exit 1
   fi
 
   printf \
