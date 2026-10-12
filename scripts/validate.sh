@@ -78,6 +78,12 @@ BEGIN{bad=0}
     if(url~/^@@\|/) url=substr(url,4)
     else url=substr(url,2)
 
+    # filter.go emits "|scheme://host/path|" for end-anchored rules. Exactly one
+    # trailing "|" is the end anchor and is not part of the URL; any other "|"
+    # (including a second trailing one) stays in the URL and fails the
+    # character-set check below, matching validAnchoredTail in filter.go.
+    if(url~/\|$/) url=substr(url,1,length(url)-1)
+
     if(url!~/^https?:\/\/[A-Za-z0-9.-]+([\/?#][A-Za-z0-9._~!$&()*+,;=:@%\/?#-]*)?$/){
       print "malformed anchored URL: " NR;bad=1;next
     }

@@ -22,6 +22,11 @@ accept=(
   '|https://example.com/ads'
   '|http://example.com'
   '@@|https://example.com/ads?x=1&y=two'
+
+  # End-anchored URLs: filter.go emits one trailing "|" for these.
+  '|https://example.com/ads.js|'
+  '@@|https://example.com/allowed.js|'
+  '|https://example.com/track.js|$third-party'
 )
 
 reject=(
@@ -82,6 +87,11 @@ reject=(
   '|https://example.com/a%2'
   '|https://example.com/a%zz'
   '@@|https://example.com/a%2G'
+
+  # Only one trailing "|" is the end anchor; anything else is a stray pipe.
+  '|https://example.com/a||'
+  '@@|https://example.com/a||'
+  '|https://example.com/a|b|'
 )
 
 fail=0
