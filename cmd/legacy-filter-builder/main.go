@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
@@ -27,8 +25,8 @@ func main() {
 	allowPartial := flag.Bool("allow-partial", false, "continue when one or more source downloads fail")
 	sortChunkBytes := flag.Int64("sort-chunk-bytes", filter.DefaultSortChunkBytes, "maximum in-memory sorter chunk size in bytes")
 	flag.Parse()
-	// Note: run() validates sortChunkBytes positivity; validating it here too
-	// would duplicate that check.
+	// run() and filter.NewExternalSorter share one policy: a non-positive
+	// --sort-chunk-bytes is an error, never silently coerced to the default.
 	if err := run(*sources, *custom, *output, *buildDir, *cacheDir, *summary, *allowPartial, *sortChunkBytes); err != nil {
 		log.Fatal(err)
 	}
@@ -52,29 +50,38 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 			return fmt.Errorf("custom rules %q is not a regular file", custom)
 		}
 	}
-	workDir := filepath.Join(buildDir, "raw")
-	if err := os.RemoveAll(workDir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(workDir, 0o755); err != nil {
-		return err
+	// Snapshots land in the shared cache directory whenever one is
+	// configured; only a hand-run builder without --cache-dir needs the
+	// per-list raw/ staging directory, so it is only created in that case.
+	downloadDir := filepath.Join(buildDir, "raw")
+	if cacheDir == "" {
+		if err := os.RemoveAll(downloadDir); err != nil {
+			return err
+		}
+		if err := os.MkdirAll(downloadDir, 0o755); err != nil {
+			return err
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
-	results, downloadErr := download.AllWithCache(ctx, urls, workDir, cacheDir, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
+	results, downloadErr := download.AllWithCache(ctx, urls, downloadDir, cacheDir, download.DefaultWorkers, download.DefaultRetries, download.DefaultTimeout)
 	successful, cached := 0, 0
+	var totalBytes int64
 	for _, result := range results {
 		if result.Err != nil {
 			continue
 		}
 		successful++
+		totalBytes += result.Bytes
 		if result.Cached {
 			cached++
 		}
 	}
 	fmt.Printf("Sources: %d configured, %d succeeded", len(urls), successful)
 	if cached > 0 {
-		fmt.Printf(" (%d cache hits, %d downloads)", cached, successful-cached)
+		fmt.Printf(" (%d cache hits, %d downloads, %d bytes)", cached, successful-cached, totalBytes)
+	} else {
+		fmt.Printf(" (%d bytes)", totalBytes)
 	}
 	fmt.Println()
 
@@ -133,7 +140,9 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		if r.Err != nil {
 			continue
 		}
-		name := shortHash(r.URL)
+		// Reuse the shared URL hash helper; only the first 12 hex chars are
+		// needed for rejected-report file names.
+		name := download.SourceName(r.URL)[:12]
 		rej := filepath.Join(buildDir, "rejected-"+name+".txt")
 		st, err := b.ReadFileToSink(r.Path, rej, sorter.Add)
 		if err != nil {
@@ -183,5 +192,3 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	}
 	return nil
 }
-
-func shortHash(s string) string { sum := sha256.Sum256([]byte(s)); return hex.EncodeToString(sum[:6]) }
