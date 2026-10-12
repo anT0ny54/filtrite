@@ -51,10 +51,8 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		}
 	}
 	// The build directory must exist before the summary file is written
-	// below. Previously this was guaranteed only as a side effect of the
-	// download package creating <buildDir>/raw/ unconditionally; now that
-	// the download package skips that directory for cache-enabled builds,
-	// the builder creates its own directory.
+	// below. The download package only creates <buildDir>/raw/ when no shared
+	// cache is configured, so the builder creates its own directory.
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}
@@ -190,7 +188,7 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	// Machine-readable summary for build tooling (build.sh consumes this
 	// instead of scraping the human-readable stdout line above). Written
 	// only after a fully successful build so a failed build can never leave
-	// stale counters behind. Besides the source counters it now carries
+	// stale counters behind. Besides the source counters it carries
 	// rule-effectiveness totals for measuring list quality.
 	if summaryPath != "" {
 		var sb strings.Builder
