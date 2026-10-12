@@ -16,6 +16,12 @@ import (
 // available for the converter and the rest of the CI/build environment.
 const DefaultSortChunkBytes int64 = 8 << 20
 
+// maxMergeFanIn bounds how many chunk files a single merge pass opens at
+// once. Rule sets whose chunk count stays at or under this merge in exactly
+// one pass; larger sets merge in bounded multi-pass rounds so peak
+// file-descriptor usage never scales with the number of chunks.
+const maxMergeFanIn = 256
+
 type SortResult struct {
 	Rules      int
 	Duplicates int
@@ -112,63 +118,26 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 	defer os.Remove(tmpPath)
 	defer tmp.Close() // no-op after the explicit Close below; covers early error returns
 
-	files := make([]*os.File, len(s.chunks))
-	readers := make([]*bufio.Reader, len(s.chunks))
-	defer func() {
-		for _, f := range files {
-			if f != nil {
-				_ = f.Close()
-			}
-		}
-	}()
-
-	h := make(mergeHeap, 0, len(s.chunks))
-	for i, path := range s.chunks {
-		f, err := os.Open(path)
+	// Merge in bounded rounds until few enough chunks remain for the final
+	// single-pass merge. Intermediate rounds must NOT deduplicate: a
+	// duplicate pair can live in two different groups, and only the final
+	// pass sees the whole stream, so collapsing early would corrupt the
+	// duplicate count and could emit a rule twice.
+	chunks := s.chunks
+	for len(chunks) > maxMergeFanIn {
+		chunks, err = s.mergeRound(chunks, maxMergeFanIn)
 		if err != nil {
-			return SortResult{}, fmt.Errorf("open sort chunk %s: %w", path, err)
+			return SortResult{}, err
 		}
-		files[i] = f
-		readers[i] = bufio.NewReaderSize(f, 64<<10)
-		line, err := nextChunkLine(readers[i])
-		if err == io.EOF {
-			continue
-		}
-		if err != nil {
-			return SortResult{}, fmt.Errorf("read sort chunk %s: %w", path, err)
-		}
-		heap.Push(&h, mergeItem{line: line, reader: readers[i]})
 	}
 
 	w := bufio.NewWriterSize(tmp, 1<<20)
-	last := ""
-	haveLast := false
-	for h.Len() > 0 {
-		// Work on the heap root in place: replacing it and calling heap.Fix
-		// costs one sift-down instead of a Pop plus a Push per line.
-		line := h[0].line
-		if haveLast && line == last {
-			result.Duplicates++
-		} else {
-			if err := writeLine(w, line); err != nil {
-				return SortResult{}, fmt.Errorf("write generated filter list: %w", err)
-			}
-			result.Rules++
-			last = line
-			haveLast = true
-		}
-
-		next, err := nextChunkLine(h[0].reader)
-		switch {
-		case err == nil:
-			h[0].line = next
-			heap.Fix(&h, 0)
-		case err == io.EOF:
-			heap.Pop(&h)
-		default:
-			return SortResult{}, fmt.Errorf("read merged sort chunk: %w", err)
-		}
+	mergedRules, mergedDuplicates, err := mergeToWriter(chunks, w, true)
+	if err != nil {
+		return SortResult{}, err
 	}
+	result.Rules = mergedRules
+	result.Duplicates += mergedDuplicates
 
 	if err := w.Flush(); err != nil {
 		return SortResult{}, fmt.Errorf("flush generated filter list: %w", err)
@@ -187,6 +156,114 @@ func (s *ExternalSorter) Finish(output string) (result SortResult, err error) {
 		return SortResult{}, fmt.Errorf("replace %s: %w", output, err)
 	}
 	return result, nil
+}
+
+// mergeRound merges consecutive groups of at most fanIn sorted chunks into
+// single sorted intermediate chunks (without deduplication) and returns the
+// replacement chunk list. Consumed input chunks are removed immediately;
+// intermediate chunks are tracked on s.chunks so Finish's deferred cleanup
+// still removes them on any error path.
+func (s *ExternalSorter) mergeRound(chunks []string, fanIn int) ([]string, error) {
+	next := make([]string, 0, (len(chunks)+fanIn-1)/fanIn)
+	for start := 0; start < len(chunks); start += fanIn {
+		end := start + fanIn
+		if end > len(chunks) {
+			end = len(chunks)
+		}
+		group := chunks[start:end]
+
+		merged, err := os.CreateTemp(s.dir, ".merge-*.txt")
+		if err != nil {
+			return nil, fmt.Errorf("create merge chunk: %w", err)
+		}
+		w := bufio.NewWriterSize(merged, 1<<20)
+		if _, _, err := mergeToWriter(group, w, false); err != nil {
+			_ = merged.Close()
+			_ = os.Remove(merged.Name())
+			return nil, err
+		}
+		if err := w.Flush(); err != nil {
+			_ = merged.Close()
+			_ = os.Remove(merged.Name())
+			return nil, fmt.Errorf("flush merge chunk: %w", err)
+		}
+		if err := merged.Close(); err != nil {
+			_ = os.Remove(merged.Name())
+			return nil, fmt.Errorf("close merge chunk: %w", err)
+		}
+		next = append(next, merged.Name())
+		s.chunks = append(s.chunks, merged.Name())
+		for _, path := range group {
+			_ = os.Remove(path)
+		}
+	}
+	return next, nil
+}
+
+// mergeToWriter k-way merges the sorted chunk files into w and returns the
+// number of rules written and duplicates collapsed. When dedupe is false the
+// output is a pure sort-merge (used for intermediate rounds, where
+// duplicates spanning groups must survive until the final pass). The caller
+// owns the chunk files: mergeToWriter opens and closes them but never
+// removes them.
+func mergeToWriter(chunks []string, w *bufio.Writer, dedupe bool) (rules int, duplicates int, err error) {
+	files := make([]*os.File, len(chunks))
+	readers := make([]*bufio.Reader, len(chunks))
+	defer func() {
+		for _, f := range files {
+			if f != nil {
+				_ = f.Close()
+			}
+		}
+	}()
+
+	h := make(mergeHeap, 0, len(chunks))
+	for i, path := range chunks {
+		f, err := os.Open(path)
+		if err != nil {
+			return 0, 0, fmt.Errorf("open sort chunk %s: %w", path, err)
+		}
+		files[i] = f
+		readers[i] = bufio.NewReaderSize(f, 64<<10)
+		line, err := nextChunkLine(readers[i])
+		if err == io.EOF {
+			continue
+		}
+		if err != nil {
+			return 0, 0, fmt.Errorf("read sort chunk %s: %w", path, err)
+		}
+		heap.Push(&h, mergeItem{line: line, reader: readers[i]})
+	}
+
+	last := ""
+	haveLast := false
+	for h.Len() > 0 {
+		// Work on the heap root in place: replacing it and calling heap.Fix
+		// costs one sift-down instead of a Pop plus a Push per line.
+		line := h[0].line
+		if dedupe && haveLast && line == last {
+			duplicates++
+		} else {
+			if err := writeLine(w, line); err != nil {
+				return 0, 0, fmt.Errorf("write merged rules: %w", err)
+			}
+			rules++
+			last = line
+			haveLast = true
+		}
+
+		next, err := nextChunkLine(h[0].reader)
+		switch {
+		case err == nil:
+			h[0].line = next
+			heap.Fix(&h, 0)
+		case err == io.EOF:
+			heap.Pop(&h)
+		default:
+			return 0, 0, fmt.Errorf("read merged sort chunk: %w", err)
+		}
+	}
+	return rules, duplicates, nil
 }
 
 func (s *ExternalSorter) flushChunk() error {
