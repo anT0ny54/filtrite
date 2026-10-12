@@ -338,3 +338,43 @@ func TestAllWithCacheReusesSource(t *testing.T) {
 		t.Fatalf("server calls=%d, want exactly 1", calls.Load())
 	}
 }
+
+// When cached sources already exceed the manifest budget, sources that were
+// never fetched must come back marked failed. A zero-valued Result with a nil
+// Err would otherwise be counted as a successful download by callers running
+// a partial (--allow-partial) build.
+func TestCachedBudgetOverflowMarksUnfetchedSourcesFailed(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	urls := make([]string, 0, 12)
+	for i := 0; i < 11; i++ {
+		u := fmt.Sprintf("https://cached-%d.example/list.txt", i)
+		urls = append(urls, u)
+		sum := sha256.Sum256([]byte(u))
+		file, err := os.Create(filepath.Join(cacheDir, hex.EncodeToString(sum[:])+".txt"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(50 << 20); err != nil {
+			file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	uncached := "https://uncached.example/list.txt"
+	urls = append(urls, uncached)
+
+	results, err := AllWithCache(context.Background(), urls, filepath.Join(root, "out"), cacheDir, 1, 0, time.Second)
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("err=%v, want ErrTooLarge", err)
+	}
+	last := results[len(results)-1]
+	if last.URL != uncached || last.Err == nil {
+		t.Fatalf("unfetched result = %+v, want URL set and Err non-nil", last)
+	}
+}

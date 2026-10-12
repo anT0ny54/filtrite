@@ -196,6 +196,15 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if cacheDir != "" {
 		for _, result := range results {
 			if result.Err != nil {
+				// Entries that were not cached are never fetched on this
+				// path; mark them failed so a caller using a partial build
+				// cannot count the zero-valued results as successes.
+				for i := range results {
+					if results[i].Err == nil && results[i].Path == "" {
+						results[i].URL = urls[i]
+						results[i].Err = fmt.Errorf("not downloaded: manifest byte budget exhausted by cached sources")
+					}
+				}
 				return results, fmt.Errorf("%s: %w", result.URL, result.Err)
 			}
 		}
@@ -214,47 +223,43 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 		return results, nil
 	}
-	// Buffer the channel with the exact number of jobs so the dispatch
-	// loop never blocks on a worker handoff.
+	// The channel holds every job, so dispatch never blocks; workers check
+	// the context before each job instead, which makes cancellation
+	// deterministic (no random select between a ready send and Done).
 	jobs := make(chan job, len(missing))
+	for _, j := range missing {
+		jobs <- j
+	}
+	close(jobs)
 	// Never start more workers than there are downloads left to do.
 	if workers > len(missing) {
 		workers = len(missing)
 	}
 	var wg sync.WaitGroup
 	wg.Add(workers)
+	destination := dir
+	if cacheDir != "" {
+		destination = cacheDir
+	}
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
 			for j := range jobs {
-				destination := dir
-				if cacheDir != "" {
-					destination = cacheDir
+				if err := ctx.Err(); err != nil {
+					// Never dispatched: fail it so callers cannot count a
+					// zero-valued Result as a successful download.
+					results[j.index] = Result{URL: j.url, Err: err}
+					continue
 				}
 				path, n, err := get(ctx, c, j.url, destination, retries, &budget)
 				results[j.index] = Result{URL: j.url, Path: path, Bytes: n, Err: err}
 			}
 		}()
 	}
-
-	for _, j := range missing {
-		select {
-		case jobs <- j:
-		case <-ctx.Done():
-			close(jobs)
-			wg.Wait()
-			// Jobs that were never dispatched have a zero Result; mark them
-			// failed so callers cannot count them as successful downloads.
-			for i := range results {
-				if results[i].Path == "" && results[i].Err == nil {
-					results[i].Err = ctx.Err()
-				}
-			}
-			return results, ctx.Err()
-		}
-	}
-	close(jobs)
 	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return results, err
+	}
 
 	var errs []error
 	for _, result := range results {
