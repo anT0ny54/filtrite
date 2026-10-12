@@ -96,3 +96,42 @@ func TestRunValidatesCustomBeforeDownload(t *testing.T) {
 		t.Fatalf("run error=%v, want custom-rule validation error before download", err)
 	}
 }
+
+func TestRunWithCacheDoesNotCreateRawDir(t *testing.T) {
+	dir := t.TempDir()
+	sources := filepath.Join(dir, "sources.txt")
+	cacheDir := filepath.Join(dir, "cache")
+	buildDir := filepath.Join(dir, "work")
+	output := filepath.Join(dir, "filters", "adblock.txt")
+	custom := filepath.Join(dir, "custom.txt")
+	cachedURL := "https://cached.example/list.txt"
+	if err := os.WriteFile(sources, []byte(cachedURL+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(custom, []byte("||custom.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(cachedURL))
+	cachedPath := filepath.Join(cacheDir, hex.EncodeToString(sum[:])+".txt")
+	if err := os.WriteFile(cachedPath, []byte("||cached.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := run(sources, custom, output, buildDir, cacheDir, filepath.Join(buildDir, "build-summary.env"), false, filter.DefaultSortChunkBytes); err != nil {
+		t.Fatal(err)
+	}
+	// Regression: a cache-enabled build must never create the raw/ staging
+	// directory; snapshots live in the shared cache instead. This failed
+	// before because download.AllWithCache created its download directory
+	// unconditionally.
+	if _, err := os.Stat(filepath.Join(buildDir, "raw")); !os.IsNotExist(err) {
+		t.Fatalf("raw staging directory exists after cache-enabled build: stat=%v", err)
+	}
+	// The build directory itself and the summary must still exist.
+	if _, err := os.Stat(filepath.Join(buildDir, "build-summary.env")); err != nil {
+		t.Fatalf("build summary missing after cache-enabled build: %v", err)
+	}
+}

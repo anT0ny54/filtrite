@@ -50,6 +50,14 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 			return fmt.Errorf("custom rules %q is not a regular file", custom)
 		}
 	}
+	// The build directory must exist before the summary file is written
+	// below. Previously this was guaranteed only as a side effect of the
+	// download package creating <buildDir>/raw/ unconditionally; now that
+	// the download package skips that directory for cache-enabled builds,
+	// the builder creates its own directory.
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		return err
+	}
 	// Snapshots land in the shared cache directory whenever one is
 	// configured; only a hand-run builder without --cache-dir needs the
 	// per-list raw/ staging directory, so it is only created in that case.
@@ -84,18 +92,6 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		fmt.Printf(" (%d bytes)", totalBytes)
 	}
 	fmt.Println()
-
-	// Machine-readable summary for build tooling (build.sh consumes this
-	// instead of scraping the human-readable stdout line above).
-	if summaryPath != "" {
-		var sb strings.Builder
-		fmt.Fprintf(&sb, "sources_configured=%d\n", len(urls))
-		fmt.Fprintf(&sb, "sources_succeeded=%d\n", successful)
-		fmt.Fprintf(&sb, "sources_cached=%d\n", cached)
-		if err := os.WriteFile(summaryPath, []byte(sb.String()), 0o644); err != nil {
-			return fmt.Errorf("write build summary: %w", err)
-		}
-	}
 
 	if downloadErr != nil {
 		for _, result := range results {
@@ -189,6 +185,25 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 			parts = append(parts, fmt.Sprintf("%s=%d", k, reasons[k]))
 		}
 		fmt.Printf("Top rejection reasons: %s\n", strings.Join(parts, ", "))
+	}
+
+	// Machine-readable summary for build tooling (build.sh consumes this
+	// instead of scraping the human-readable stdout line above). Written
+	// only after a fully successful build so a failed build can never leave
+	// stale counters behind. Besides the source counters it now carries
+	// rule-effectiveness totals for measuring list quality.
+	if summaryPath != "" {
+		var sb strings.Builder
+		fmt.Fprintf(&sb, "sources_configured=%d\n", len(urls))
+		fmt.Fprintf(&sb, "sources_succeeded=%d\n", successful)
+		fmt.Fprintf(&sb, "sources_cached=%d\n", cached)
+		fmt.Fprintf(&sb, "rules_read=%d\n", totalRead)
+		fmt.Fprintf(&sb, "rules_rejected=%d\n", totalRejected)
+		fmt.Fprintf(&sb, "rules_duplicates=%d\n", result.Duplicates)
+		fmt.Fprintf(&sb, "rules_output=%d\n", result.Rules)
+		if err := os.WriteFile(summaryPath, []byte(sb.String()), 0o644); err != nil {
+			return fmt.Errorf("write build summary: %w", err)
+		}
 	}
 	return nil
 }
