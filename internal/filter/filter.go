@@ -80,6 +80,11 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 	if err := rej.Flush(); err != nil {
 		return stats, fmt.Errorf("write rejected report: %w", err)
 	}
+	// The deferred Close above only covers early returns and discards its
+	// error; close explicitly here so a failed final write is not silent.
+	if err := rejFile.Close(); err != nil {
+		return stats, fmt.Errorf("close rejected report: %w", err)
+	}
 	return stats, nil
 }
 
@@ -303,9 +308,10 @@ var elementTypeOptions = map[string]struct{}{
 
 // activationTypeOptions are the ActivationType keywords, which the upstream
 // parser marks whitelist-only (FLAG_IS_WHITELIST_ONLY) and non-tristate: they
-// may only appear on "@@" exception rules and never negated. CSS-related activation types are intentionally omitted because the legacy engine strips them. Each one simply
-// ORs a bit into the rule, independent of every other option, so any subset
-// of them can be safely reordered/sorted.
+// may only appear on "@@" exception rules and never negated. CSS-related
+// activation types are intentionally omitted because the legacy engine strips
+// them. Each one simply ORs a bit into the rule, independent of every other
+// option, so any subset of them can be safely reordered/sorted.
 var activationTypeOptions = map[string]struct{}{
 	"document": {}, "genericblock": {},
 }
@@ -317,8 +323,8 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 	if opts == "" {
 		return "", false
 	}
-	// third-party and domain may each appear once; plain flags replace the
-	// per-call map this function used to allocate for every rule.
+	// third-party and domain may each appear once; plain flags avoid
+	// allocating a per-rule map.
 	var thirdParty, domains string
 	var matchCase, thirdPartySeen, domainSeen bool
 
