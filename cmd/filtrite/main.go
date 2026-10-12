@@ -15,6 +15,14 @@ import (
 )
 
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+// run holds the defers (signal handler, timeout) so they execute before
+// main exits; calling log.Fatal inline would skip them.
+func run() error {
 	input := flag.String("input", "filters/adblock.txt", "legacy-compatible filter-list")
 	output := flag.String("output", "dist/adblock.dat", "unindexed Chromium ruleset")
 	converter := flag.String("converter", "deps/ruleset_converter", "ruleset_converter executable")
@@ -27,10 +35,12 @@ func main() {
 	ctx, cancel := context.WithTimeout(ctx, *timeout)
 	defer cancel()
 	if err := ruleset.Convert(ctx, ruleset.Options{Converter: *converter, Input: *input, Output: *output, Log: *logPath}); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	log.Printf("generated %s (%s)", filepath.Clean(*output), fileSize(*output))
+	return nil
 }
+
 func fileSize(p string) string {
 	if s, e := os.Stat(p); e == nil {
 		return formatBytes(s.Size())
