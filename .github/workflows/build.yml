@@ -44,8 +44,10 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      # Invoked via bash so the job works even if the checkout does not
+      # preserve the executable bit (e.g. Windows-hosted checkouts, archives).
       - name: Build and validate
-        run: ./build.sh
+        run: bash ./build.sh
 
       - name: Validator regression tests
         run: bash scripts/validate_test.sh
