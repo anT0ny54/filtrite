@@ -133,10 +133,16 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return nil, fmt.Errorf("create download directory: %w", err)
-	}
-	if cacheDir != "" {
+	// The per-caller staging directory only receives downloads when no
+	// shared cache is configured (workers download straight into the cache),
+	// so creating it unconditionally would resurrect directories such as
+	// build/work/<name>/raw/ that cache-enabled builds are documented never
+	// to create.
+	if cacheDir == "" {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, fmt.Errorf("create download directory: %w", err)
+		}
+	} else {
 		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
 			return nil, fmt.Errorf("create source cache directory: %w", err)
 		}
