@@ -100,6 +100,13 @@ func isBareDomainBlock(rule string) bool {
 	return validDomain(host)
 }
 
+// unsupportedMarkers are the cosmetic, scriptlet and procedural-filter
+// markers rejected by normalize. scripts/validate.sh mirrors this list.
+var unsupportedMarkers = [...]string{
+	"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
+	"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
+}
+
 func normalize(line string) (string, string, bool) {
 	if !utf8.ValidString(line) {
 		return "", "invalid-utf8", false
@@ -107,10 +114,7 @@ func normalize(line string) (string, string, bool) {
 	// Every cosmetic/scriptlet marker contains one of these three bytes.
 	// Avoid the full marker scan for the overwhelmingly common network-rule case.
 	if strings.ContainsAny(line, "#+:") {
-		for _, marker := range []string{
-			"##", "#@#", "#?#", "#$#", "#%#", "#^#", "#@%?#",
-			"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
-		} {
+		for _, marker := range unsupportedMarkers {
 			if strings.Contains(line, marker) {
 				return "", "unsupported-cosmetic-scriptlet", false
 			}
@@ -313,18 +317,17 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 	if opts == "" {
 		return "", false
 	}
-	var thirdParty string
-	var matchCase bool
-	var domains string
-	seen := make(map[string]struct{}, 3)
+	// third-party and domain may each appear once; plain flags replace the
+	// per-call map this function used to allocate for every rule.
+	var thirdParty, domains string
+	var matchCase, thirdPartySeen, domainSeen bool
 
 	// Resource-type (ElementType) options: same-sign-only, see comment above.
+	// At most 12 names exist, so a linear duplicate scan beats a map.
 	var typeNegated *bool
-	typeSeen := make(map[string]struct{}, 4)
 	var typeNames []string
 
 	// Whitelist-only ActivationType options: never negated, plain set union.
-	activationSeen := make(map[string]struct{}, 4)
 	var activationNames []string
 
 	for _, token := range strings.Split(opts, ",") {
@@ -352,7 +355,7 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			if hasValue || len(activationNames) > 0 {
 				return "", false
 			}
-			if _, exists := typeSeen[name]; exists {
+			if containsString(typeNames, name) {
 				return "", false
 			}
 			if typeNegated == nil {
@@ -361,7 +364,6 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			} else if *typeNegated != negated {
 				return "", false
 			}
-			typeSeen[name] = struct{}{}
 			typeNames = append(typeNames, name)
 			continue
 		}
@@ -370,26 +372,22 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			if hasValue || negated || len(typeNames) > 0 || !exception {
 				return "", false
 			}
-			if _, exists := activationSeen[name]; exists {
+			if containsString(activationNames, name) {
 				return "", false
 			}
-			activationSeen[name] = struct{}{}
 			activationNames = append(activationNames, name)
 			continue
 		}
 
 		switch name {
 		case "third-party":
-			// Duplicate detection via seen[name] already rejects both
-			// "third-party,third-party" and "third-party,~third-party": "~" is
-			// stripped before the switch, so both signs share the name.
-			if hasValue {
+			// thirdPartySeen rejects both "third-party,third-party" and
+			// "third-party,~third-party": "~" is stripped before the switch,
+			// so both signs share the name.
+			if hasValue || thirdPartySeen {
 				return "", false
 			}
-			if _, exists := seen[name]; exists {
-				return "", false
-			}
-			seen[name] = struct{}{}
+			thirdPartySeen = true
 			if negated {
 				thirdParty = "~third-party"
 			} else {
@@ -401,13 +399,10 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			}
 			matchCase = true
 		case "domain":
-			if negated || !hasValue || value == "" {
+			if negated || !hasValue || value == "" || domainSeen {
 				return "", false
 			}
-			if _, exists := seen[name]; exists {
-				return "", false
-			}
-			seen[name] = struct{}{}
+			domainSeen = true
 			canonical, ok := canonicalDomainList(value)
 			if !ok {
 				return "", false
@@ -535,6 +530,15 @@ func validDomain(s string) bool {
 		}
 	}
 	return !allNumeric
+}
+
+func containsString(list []string, v string) bool {
+	for _, item := range list {
+		if item == v {
+			return true
+		}
+	}
+	return false
 }
 
 func sanitizeReport(s string) string {
