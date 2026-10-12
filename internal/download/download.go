@@ -166,7 +166,6 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		index int
 		url   string
 	}
-	jobs := make(chan job)
 	results := make([]Result, len(urls))
 	budget := MaxTotalBytes
 
@@ -185,9 +184,14 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 		missing = append(missing, job{index: i, url: rawURL})
 	}
-	for _, result := range results {
-		if result.Err != nil {
-			return results, fmt.Errorf("%s: %w", result.URL, result.Err)
+	// Only cached reads can have produced errors at this point (worker
+	// results do not exist yet), so skip the scan entirely when no cache
+	// directory is in use.
+	if cacheDir != "" {
+		for _, result := range results {
+			if result.Err != nil {
+				return results, fmt.Errorf("%s: %w", result.URL, result.Err)
+			}
 		}
 	}
 	if len(missing) == 0 {
@@ -204,6 +208,9 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 		return results, nil
 	}
+	// Buffer the channel with the exact number of jobs so the dispatch
+	// loop never blocks on a worker handoff.
+	jobs := make(chan job, len(missing))
 	// Never start more workers than there are downloads left to do.
 	if workers > len(missing) {
 		workers = len(missing)
@@ -500,3 +507,9 @@ func retryable(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 func shaName(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
+
+// SourceName returns the stable file name (full SHA-256 hex of the URL) used
+// for source-cache entries. Callers that only need a short prefix may slice
+// the returned string; this is the single URL-hashing implementation shared
+// with cmd/legacy-filter-builder.
+func SourceName(s string) string { return shaName(s) }
