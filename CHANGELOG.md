@@ -5,107 +5,46 @@ All notable changes to this project are documented in this file.
 ## [Unreleased]
 
 ### Fixed
-- `scripts/validate.sh`: cosmetic and scriptlet markers (`#@%?#`, `#?#`,
-  `+js(`, `:has-text(`, …) are now matched as literal strings instead of ERE
-  regexes, removing implementation-dependent `\?` and lone-`(` escaping.
-- `scripts/validate.sh`: the bare-domain `$third-party` guard check now uses
-  the same hostname shape as `validDomain` in `internal/filter` (lower-case
-  labels, proper label boundaries, at least two labels, not all-numeric).
-- Anchored-URL tails are validated in `internal/filter` against the exact
-  printable-ASCII subset `scripts/validate.sh` accepts
-  (`anchoredURLChars`), and every `%` must start a well-formed two-digit hex
-  escape. A rule the Go stage emits can no longer pass the Go parser and
-  then fail validation, aborting a release build.
-- `build.sh`: the `mktemp` EXIT trap is disarmed after the converter
-  download block instead of leaking to the end of the script; the two Go
-  helper binaries are compiled in parallel.
-- `legacy-filter-builder`: `--sort-chunk-bytes <= 0` is rejected by both
-  `run()` and `filter.NewExternalSorter` (the sorter previously coerced it
-  silently to the default — a conflicting policy).
-- `internal/download.AllWithCache` no longer creates the per-caller staging
-  directory when a shared cache is configured. The builder's own guard only
-  covered half the path: the download package's unconditional
-  `os.MkdirAll(dir)` recreated `build/work/<name>/raw/` for every
-  cache-enabled build, contradicting the documented behavior.
-- `legacy-filter-builder`: `run()` now creates the build directory itself
-  before writing the `--summary` file. It previously relied on the download
-  package's (now removed) side effect of creating `<buildDir>/raw/`, which
-  would have broken summary writes for cache-enabled builds.
-- `build.sh`: both parallel Go helper builds are always waited on and both
-  exit statuses are collected before the script fails; the first failure no
-  longer aborts under `set -e` and leaves the other build uncollected.
-- `build.sh`: a generated `dist/<name>.dat` over `MAX_RULESET_BYTES` now
-  aborts the build with a nonzero exit status, and the oversized artifact is
-  deleted before exiting, so an over-limit ruleset can never be published.
+- `internal/download.AllWithCache`: when cached sources alone exhausted the
+  500 MiB manifest budget, the early return left every not-yet-fetched source
+  as a zero-valued `Result` (empty URL/path, nil error). With
+  `--allow-partial` the builder counted those as successful downloads and
+  then failed trying to open path `""`. Unfetched sources are now returned
+  with their URL and a non-nil error. Regression test:
+  `TestCachedBudgetOverflowMarksUnfetchedSourcesFailed`.
+- `cmd/filtrite`: `log.Fatal` was called from `main` after `defer stop()` /
+  `defer cancel()`, so those defers never ran on failure. The work now lives
+  in `run()`, which returns the error to `main`.
 
 ### Changed
-- `legacy-filter-builder` no longer recreates the empty
-  `build/work/<name>/raw/` directory when `--cache-dir` is set; `raw/` only
-  exists for hand-run builds without a cache directory.
-- `internal/download.Result.Bytes` is now surfaced in the builder's summary
-  output (it was previously written but never read).
-- The worker job channel in `AllWithCache` is buffered to the exact job
-  count; the cached-error scan is skipped when no cache directory is used.
-- `ExternalSorter.Finish` merges sort chunks with a bounded fan-in
-  (256 chunks per pass). Inputs whose chunk count exceeds the fan-in merge
-  in multi-pass rounds instead of opening every chunk simultaneously, so
-  peak file-descriptor usage stays constant for unusually large rule sets.
-  Intermediate rounds sort-merge only (no deduplication): duplicates can
-  span rounds, so only the final pass collapses them, keeping the output and
-  the duplicate count bit-identical to a single-pass merge.
-- The builder's `--summary` file now also reports `rules_read`,
-  `rules_rejected`, `rules_duplicates`, and `rules_output` for per-list
-  effectiveness measurement, and is written only on success so a failed
-  build never leaves stale counters behind.
+- `internal/download.AllWithCache` dispatches work deterministically: all jobs
+  are queued up front (the channel was already sized to hold every job, so the
+  old `select` against `ctx.Done()` could never block and chose randomly when
+  the context was already canceled), and each worker checks the context before
+  starting a job, marking jobs it skips with the context error. On
+  cancellation the function still returns `ctx.Err()` and no result is left
+  zero-valued.
+- `internal/filter`: `parseModifiers` no longer allocates three maps per rule;
+  `third-party`/`domain` use boolean flags and element/activation type
+  duplicates are found by scanning the (at most 12-entry) name slices.
+  Output is unchanged (verified against the previous implementation on a
+  161-case modifier corpus). The cosmetic/scriptlet marker list in `normalize`
+  is a package-level array instead of a slice rebuilt per call.
+- `build.sh` no longer unsets `sources_cached`, which it never read (the key is
+  still written to the summary file for other tooling).
 
-### Added
-- Regression test `TestRunWithCacheDoesNotCreateRawDir`: a cache-enabled
-  build must never create `build/work/<name>/raw/`.
+### Documentation
+- README: the Build section's "Multiple named lists" cross-reference pointed
+  "below" although that section is above it.
+- README: `rules_read` is documented as an input-line count (it includes `!`
+  comments and blank lines), matching `Stats.Read`.
+- README: documented that cached-budget exhaustion reports unfetched sources
+  as failed, that release-summary links use `GITHUB_REPOSITORY` with an
+  `anT0ny54/filtrite` fallback for local builds, and that `filtrite` stops the
+  converter on `SIGINT`/`SIGTERM`.
 
-### Removed
-- Dead `.gitattributes` rules for `*.py`, `*.ts`, `*.tsx`, `*.js`, `*.jsx`,
-  and `*.json` — no such files exist in this repository.
-- Duplicated URL-hashing logic in `cmd/legacy-filter-builder` (`shortHash`);
-  it now reuses the `SourceName` helper exported by `internal/download`.
-- Stale test comment referencing a removed package-level Optimize API.
-
-### Notes
-- `||host/path` patterns may contain a literal `#` (e.g.
-  `||example.com/page#frag`). Chromium's legacy rule parser treats it as a
-  literal pattern character, so it is converter-safe; such rules are
-  preserved, not rewritten.
-- `build.sh`, `scripts/validate.sh`, and `scripts/validate_test.sh` are
-  committed with the executable bit; the CI `chmod` workaround was removed.
-- The 20 MiB `MAX_RULESET_BYTES` ceiling is a release requirement, not a
-  recommendation: exceeding it fails the build. Set `MAX_RULESET_BYTES`
-  explicitly when intentionally shipping a larger ruleset.
-
-## Current release behavior (as built by `./build.sh`)
-
-- Builds every `lists/<name>.txt` manifest independently into
-  `filters/<name>.txt` and `dist/<name>.dat`, layering non-empty
-  `custom-rules.txt` onto every list.
-- Downloads share a per-build source cache (`build/source-cache/`): 50 MiB
-  per-source / 500 MiB per-manifest budget, at most 100 sources, 8 workers,
-  4 retries with exponential backoff plus `Retry-After`, a 4-hop redirect
-  limit, and refused HTTPS downgrades and credential-bearing redirects.
-  Source failures are release-fatal unless `--allow-partial` is passed.
-- Rules are validated/canonicalized against the legacy Chromium
-  `subresource_filter` syntax subset; unsupported lines are written to
-  `build/work/<name>/rejected-*.txt` reports (`# line<TAB>reason<TAB>rule`
-  header, one report per source URL by short URL hash, plus
-  `rejected-custom.txt`).
-- Accepted rules stream through an external merge sort (8 MiB default
-  in-memory chunk, tunable via `--sort-chunk-bytes`, bounded 256-way merge
-  fan-in with multi-pass rounds for very large inputs); duplicates collapse
-  during the merge. Bare `||host^` rules gain the `$third-party` guard at
-  sorter ingestion.
-- `scripts/validate.sh` sanity-checks every generated list before `filtrite`
-  runs Chromium's `ruleset_converter`
-  (`--input_format=filter-list --output_format=unindexed-ruleset`); a
-  `dist/<name>.dat` over 20 MiB (override with `MAX_RULESET_BYTES`) fails
-  the build and the oversized artifact is deleted.
-- `.github/workflows/build.yml` runs daily at 03:17 UTC, is serialized, and
-  keeps the latest 2 releases; `Keep-Alive.yml` rewrites
-  `.github/keep-alive.txt` on the 1st and 15th of each month so the schedule
-  is not disabled after 60 days of inactivity.
+### Review notes (no change required)
+- Static review found no unused functions in non-test code; `go vet` and
+  `go test -race ./...` pass.
+- `actions/checkout@v7` and `softprops/action-gh-release@v3.0.3` exist as
+  published releases; the workflows were left unchanged.
