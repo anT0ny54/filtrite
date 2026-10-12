@@ -45,9 +45,7 @@ jobs:
         run: go test ./...
 
       - name: Build and validate
-        run: |
-          chmod +x build.sh scripts/validate.sh
-          ./build.sh
+        run: ./build.sh
 
       - name: Validator regression tests
         run: bash scripts/validate_test.sh
