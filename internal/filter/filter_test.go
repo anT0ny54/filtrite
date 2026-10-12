@@ -20,8 +20,7 @@ func readRules(t *testing.T, in, rej string) ([]string, Stats) {
 	return rules, st
 }
 
-// optimizeRules is the test replacement for the removed package-level
-// Optimize API. It exercises the same production transformation used by the
+// optimizeRules exercises the same production transformation used by the
 // builder: the third-party guard applied by ExternalSorter.Add, followed by
 // deduplication, canonical sorting, and merge.
 func optimizeRules(t *testing.T, rules []string) ([]string, int) {

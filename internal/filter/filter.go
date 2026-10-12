@@ -150,8 +150,11 @@ func normalize(line string) (string, string, bool) {
 		}
 	}
 
-	for _, r := range line {
-		if r < 0x21 || r > 0x7e {
+	// Byte-level range scan: utf8.ValidString above guarantees valid UTF-8,
+	// and every byte of a multi-byte rune is > 0x7e, so checking bytes is
+	// equivalent to the rune range check but skips rune decoding.
+	for i := 0; i < len(line); i++ {
+		if line[i] < 0x21 || line[i] > 0x7e {
 			return "", "non-ascii-or-whitespace", false
 		}
 	}
@@ -205,10 +208,13 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 	if strings.HasPrefix(pattern, "|https://") || strings.HasPrefix(pattern, "|http://") {
 		hasEnd := strings.HasSuffix(pattern, "|")
 		plain := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
-		if strings.ContainsAny(plain, "<>\\") {
+		schemeEnd := strings.Index(plain, "://") + 3
+		if schemeEnd < 3 {
+			// Unreachable after the HasPrefix checks above ("://" is always
+			// present); the guard keeps the slice below safe if this branch
+			// is ever refactored away from those prefixes.
 			return "", "", false
 		}
-		schemeEnd := strings.Index(plain, "://") + 3
 		scheme, afterScheme := plain[:schemeEnd], plain[schemeEnd:]
 		pos := strings.IndexAny(afterScheme, "/?#")
 		host, tail := afterScheme, ""
@@ -216,6 +222,16 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 			host, tail = afterScheme[:pos], afterScheme[pos:]
 		}
 		if !validDomain(host) {
+			return "", "", false
+		}
+		// The tail is restricted to the same conservative printable-ASCII
+		// subset scripts/validate.sh accepts (anchoredURLChars below), so a
+		// rule emitted here can never fail validation later and abort a
+		// release build. Every '%' must additionally start a well-formed
+		// two-digit hex escape. This also rejects the raw < > \ ^ | [ ] {
+		// } " ' characters the validator (and Chromium's URL grammar)
+		// cannot represent.
+		if !validAnchoredTail(tail) {
 			return "", "", false
 		}
 		// Hostnames are case-insensitive, and GURL lower-cases the host
@@ -230,6 +246,41 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		return "|" + canonical + modSuffix, "", true
 	}
 	return "", "", false
+}
+
+// anchoredURLChars is the single source of truth for the printable-ASCII
+// character subset allowed in anchored-URL tails. scripts/validate.sh checks
+// generated output against the identical set; keep both sides in sync.
+const anchoredURLChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~!$&()*+,;=:@%/?#-"
+
+var anchoredURLCharSet = func() [utf8.RuneSelf]bool {
+	var set [utf8.RuneSelf]bool
+	for i := 0; i < len(anchoredURLChars); i++ {
+		set[anchoredURLChars[i]] = true
+	}
+	return set
+}()
+
+func isHexByte(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
+}
+
+// validAnchoredTail reports whether every byte of tail is in the shared
+// anchored-URL charset and every '%' introduces a two-digit hex escape.
+func validAnchoredTail(tail string) bool {
+	for i := 0; i < len(tail); i++ {
+		c := tail[i]
+		if c >= utf8.RuneSelf || !anchoredURLCharSet[c] {
+			return false
+		}
+		if c == '%' {
+			if i+2 >= len(tail) || !isHexByte(tail[i+1]) || !isHexByte(tail[i+2]) {
+				return false
+			}
+			i += 2
+		}
+	}
+	return true
 }
 
 // elementTypeOptions are the resource-type keywords Chromium's legacy
@@ -401,7 +452,14 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 // generated output stable and aligns with the converter's own representation.
 func canonicalDomainList(value string) (string, bool) {
 	entries := strings.Split(value, "|")
-	out := make([]string, 0, len(entries))
+	// base is the canonical entry without its "~" prefix, precomputed once
+	// so the sort comparator below does not allocate a TrimPrefix result
+	// on every comparison (O(n log n) allocations otherwise).
+	type domainEntry struct {
+		canonical string
+		base      string
+	}
+	out := make([]domainEntry, 0, len(entries))
 	seen := make(map[string]struct{}, len(entries))
 	excludedBase := make(map[string]bool, len(entries))
 	for _, entry := range entries {
@@ -428,19 +486,23 @@ func canonicalDomainList(value string) (string, bool) {
 		}
 		excludedBase[base] = exclude == "~"
 		seen[canonical] = struct{}{}
-		out = append(out, canonical)
+		out = append(out, domainEntry{canonical: canonical, base: base})
 	}
 	if len(out) == 0 {
 		return "", false
 	}
 	sort.Slice(out, func(i, j int) bool {
-		a, b := strings.TrimPrefix(out[i], "~"), strings.TrimPrefix(out[j], "~")
+		a, b := out[i].base, out[j].base
 		if len(a) != len(b) {
 			return len(a) > len(b)
 		}
-		return out[i] < out[j]
+		return out[i].canonical < out[j].canonical
 	})
-	return strings.Join(out, "|"), true
+	joined := make([]string, len(out))
+	for i := range out {
+		joined[i] = out[i].canonical
+	}
+	return strings.Join(joined, "|"), true
 }
 
 func validDomain(s string) bool {
@@ -459,10 +521,13 @@ func validDomain(s string) bool {
 		if len(part) == 0 || len(part) > 63 || part[0] == '-' || part[len(part)-1] == '-' {
 			return false
 		}
-		for _, r := range part {
+		// Byte scan: every caller passes ASCII-only strings (normalize
+		// range-checks first; source manifests are ASCII by construction).
+		for i := 0; i < len(part); i++ {
+			c := part[i]
 			switch {
-			case r >= '0' && r <= '9':
-			case (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '-':
+			case c >= '0' && c <= '9':
+			case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-':
 				allNumeric = false
 			default:
 				return false

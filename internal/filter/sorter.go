@@ -36,7 +36,9 @@ func NewExternalSorter(dir string, chunkBytes int64) (*ExternalSorter, error) {
 		return nil, fmt.Errorf("sort directory is empty")
 	}
 	if chunkBytes <= 0 {
-		chunkBytes = DefaultSortChunkBytes
+		// Same policy as run() in cmd/legacy-filter-builder: silent
+		// coercion to the default hides caller mistakes, so reject them.
+		return nil, fmt.Errorf("sort chunk size must be positive")
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create sort directory: %w", err)
