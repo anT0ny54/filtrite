@@ -85,6 +85,43 @@ All notable changes to this project are documented in this file.
   `anT0ny54/filtrite` fallback for local builds, and that `filtrite` stops the
   converter on `SIGINT`/`SIGTERM`.
 
+### Review
+- Full-codebase review performed (every Go source and test file, both shell
+  scripts, both workflows, and all documentation): no dead code, no bugs, and
+  no conflicts found. Every top-level function, method, and type in non-test
+  code has a caller (the `container/heap` methods on `mergeHeap` are required
+  by the heap interface), and no imports are unused.
+- Cross-checked the Go normalizer against the shell validator for drift:
+  modifier splitting on the last dollar sign (both sides), element/activation
+  type rules (same-sign-only, exception-only activation), `domain=` list
+  canonicalization and conflict rejection, the anchored-URL character set,
+  end-anchored `|` handling, and the bare-domain third-party guard all
+  agree. Anchored-URL tails containing a dollar sign before the final
+  modifier list are accepted or rejected identically on both sides.
+- README statements re-verified against the code and left unchanged: redirect
+  limit (4 hops; the guard counts the initial request so a 5th hop is
+  refused), backoff schedule (0.5 s, 1 s, 2 s, 4 s), `Retry-After` cap
+  (2 minutes), 50 MiB per-source / 500 MiB per-manifest budgets including
+  cached bytes, 2-minute per-request timeout with 4 retries, 15-minute
+  overall deadline, 100-source cap, 8 workers (never more than remaining
+  downloads), 8 MiB sort chunk with 256-chunk merge fan-in, summary keys,
+  rejected-report naming, 20 MiB ruleset release limit, and the workflow
+  settings (`paths` filter, cron schedules, `keep_latest: 2`, action
+  versions `actions/checkout@v7`, `actions/setup-go@v7`,
+  `softprops/action-gh-release@v3.0.3`,
+  `dev-drprasad/delete-older-releases@v0.3.4`).
+- Verification performed for this revision (Go toolchain 1.27.2):
+  `go vet ./...` clean; `go test ./...` passes; `go test -race ./...` passes;
+  `scripts/validate_test.sh` passes (14 accept, 53 reject, converter
+  cross-check skipped without a cached converter); `build.sh` and
+  `scripts/validate.sh` pass `bash -n`.
+- Minor observations deliberately left as-is: `rejectAliasedPaths` stats the
+  input a second time after `Convert` already validated it (one extra
+  syscall), and `AllWithCache` uses atomic operations on the byte budget
+  during the single-threaded cache scan (harmless, keeps one accounting
+  style throughout). `download.SourceName` remains a justified one-line
+  wrapper shared with `cmd/legacy-filter-builder`.
+
 ### Review notes (no change required)
 - Verification performed for this revision: `scripts/validate_test.sh` was run
   (14 accept, 53 reject, all passing) and `build.sh` passes `bash -n`. No Go

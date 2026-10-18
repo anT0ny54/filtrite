@@ -170,9 +170,10 @@ The shell validator is deliberately a line-local sanity check rather than a seco
 
 This feeds known-good and known-malformed generated rules through `validate.sh`. When `deps/ruleset_converter` exists (after `./build.sh`), every rule the validator accepts is also run through the real converter, so the validator cannot drift into accepting rules Chromium rejects. The CI workflow runs it after the build.
 
-Unit tests:
+Static analysis (`go vet ./...`) alongside the unit tests:
 
 ```sh
+go vet ./...
 go test ./...
 ```
 
