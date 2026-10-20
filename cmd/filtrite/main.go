@@ -29,6 +29,9 @@ func run() error {
 	logPath := flag.String("log", "build/work/adblock/ruleset-converter.log", "converter log")
 	timeout := flag.Duration("timeout", 5*time.Minute, "converter timeout")
 	flag.Parse()
+	if *timeout <= 0 {
+		return fmt.Errorf("timeout must be positive")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -47,6 +50,7 @@ func fileSize(p string) string {
 	}
 	return "unknown"
 }
+
 func formatBytes(n int64) string {
 	const (
 		k = 1024
