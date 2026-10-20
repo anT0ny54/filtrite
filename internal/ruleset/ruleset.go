@@ -7,6 +7,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"filtrite/internal/pathutil"
 )
 
 type Options struct {
@@ -16,27 +18,26 @@ type Options struct {
 	Log       string
 }
 
+type namedPath struct {
+	name string
+	path string
+}
+
 func rejectAliasedPaths(input, output, logPath string) error {
-	paths := []struct {
-		name string
-		path string
-	}{
+	paths := []namedPath{
 		{name: "input", path: input},
 		{name: "output", path: output},
 	}
 	if logPath != "" {
-		paths = append(paths, struct {
-			name string
-			path string
-		}{name: "log", path: logPath})
+		paths = append(paths, namedPath{name: "log", path: logPath})
 	}
 
 	for i := range paths {
-		a, err := filepath.Abs(paths[i].path)
+		resolvedPath, err := pathutil.Resolve(paths[i].path)
 		if err != nil {
 			return fmt.Errorf("resolve %s path %q: %w", paths[i].name, paths[i].path, err)
 		}
-		paths[i].path = filepath.Clean(a)
+		paths[i].path = resolvedPath
 	}
 
 	// Stat each canonical path exactly once; the pairwise loop below only
@@ -45,6 +46,12 @@ func rejectAliasedPaths(input, output, logPath string) error {
 	statErrs := make([]error, len(paths))
 	for i := range paths {
 		infos[i], statErrs[i] = os.Stat(paths[i].path)
+	}
+	if statErrs[0] != nil {
+		return fmt.Errorf("input: %w", statErrs[0])
+	}
+	if !infos[0].Mode().IsRegular() {
+		return fmt.Errorf("input is not a regular file: %s", input)
 	}
 
 	for i := 0; i < len(paths); i++ {
@@ -76,12 +83,8 @@ func Convert(ctx context.Context, o Options) error {
 	if strings.TrimSpace(o.Output) == "" {
 		return fmt.Errorf("output is empty")
 	}
-	inputInfo, err := os.Stat(o.Input)
-	if err != nil {
-		return fmt.Errorf("input: %w", err)
-	}
-	if !inputInfo.Mode().IsRegular() {
-		return fmt.Errorf("input is not a regular file: %s", o.Input)
+	if o.Log != "" && strings.TrimSpace(o.Log) == "" {
+		return fmt.Errorf("log path must be empty or a non-blank path")
 	}
 	if err := rejectAliasedPaths(o.Input, o.Output, o.Log); err != nil {
 		return err

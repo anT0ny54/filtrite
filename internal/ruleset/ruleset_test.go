@@ -35,3 +35,41 @@ func TestConvertRejectsAliasedPaths(t *testing.T) {
 		})
 	}
 }
+
+func TestConvertRejectsOutputAndLogAliasedThroughSymlinkedParent(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	output := filepath.Join(realDir, "rules.dat")
+	logPath := filepath.Join(aliasDir, "rules.dat")
+	err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: output, Log: logPath})
+	if err == nil || !strings.Contains(err.Error(), "output and log paths must not alias") {
+		t.Fatalf("Convert error=%v, want symlink-resolved output/log collision rejection", err)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output was created despite alias rejection: stat=%v", statErr)
+	}
+}
+
+func TestConvertRejectsWhitespaceOnlyLogPath(t *testing.T) {
+	dir := t.TempDir()
+	input := filepath.Join(dir, "input.txt")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: filepath.Join(dir, "out.dat"), Log: "   "})
+	if err == nil || !strings.Contains(err.Error(), "log path must be empty or a non-blank path") {
+		t.Fatalf("Convert error=%v, want whitespace-only log-path rejection", err)
+	}
+}
