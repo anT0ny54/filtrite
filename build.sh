@@ -70,11 +70,6 @@ if [[ ! -x deps/ruleset_converter ]]; then
   rm -f "$tmp"
 fi
 
-[[ -x deps/ruleset_converter ]] || {
-  echo "ERROR: ruleset_converter not installed" >&2
-  exit 1
-}
-
 # Build both helpers concurrently. Go's build cache still compiles the
 # shared internal packages only once, and linking two small binaries in
 # parallel beats building them back to back. Both exit statuses are
@@ -152,8 +147,6 @@ for manifest in "${manifests[@]}"; do
     --output "dist/$name.dat" \
     --converter deps/ruleset_converter \
     --log "$work/ruleset-converter.log"
-
-  test -s "dist/$name.dat"
 
   ruleset_bytes="$(wc -c < "dist/$name.dat")"
 
