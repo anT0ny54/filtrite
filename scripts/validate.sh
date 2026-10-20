@@ -3,6 +3,18 @@ set -Eeuo pipefail
 file="${1:-filters/adblock.txt}"
 [[ -s "$file" ]] || { echo "ERROR: missing/empty $file" >&2; exit 1; }
 awk '
+function valid_domain(host,    n, labels, i, label, all_numeric) {
+  if(length(host)==0 || length(host)>253)return 0
+  n=split(host,labels,".")
+  if(n<2)return 0
+  all_numeric=1
+  for(i=1;i<=n;i++){
+    label=labels[i]
+    if(length(label)==0 || length(label)>63 || label~/^-/ || label~/-$/ || label!~/^[A-Za-z0-9-]+$/)return 0
+    if(label~/[A-Za-z-]/)all_numeric=0
+  }
+  return !all_numeric
+}
 BEGIN{bad=0}
 {
   sub(/\r$/,"")
@@ -44,7 +56,7 @@ BEGIN{bad=0}
           for(k=1;k<=nd;k++){
             d=doms[k];ex=0
             if(d~/^~/){ex=1;d=substr(d,2)}
-            if(d!~/^[a-z0-9.-]+$/||d!~/\./||d~/^\.|\.$|\.\./){print "bad domain= entry: " NR;bad=1;continue}
+            if(d!~/^[a-z0-9.-]+$/||!valid_domain(d)){print "bad domain= entry: " NR;bad=1;continue}
             if((ex d) in dseen){print "duplicate domain= entry: " NR;bad=1}
             if((d in dbase)&&dbase[d]!=ex){print "conflicting domain= entry: " NR;bad=1}
             dseen[ex d]=1;dbase[d]=ex
@@ -100,16 +112,18 @@ BEGIN{bad=0}
     }
     if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1;next}
     if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1;next}
-    nlabels=split(host,labels,".")
-    for(k=1;k<=nlabels;k++){
-      if(labels[k]!~/^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/){
-        print "bad hostname label: " NR;bad=1;break
-      }
-    }
+    if(!valid_domain(host)){print "bad hostname label or length: " NR;bad=1;next}
     next
   }
 
   if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else {print "unsupported prefix: " NR;bad=1;next}
+  # In domain-anchored network rules, `|` can only be one final end anchor.
+  # Strip that one for host parsing and reject internal/repeated pipes.
+  if(index(x,"|")){
+    if(x !~ /\|$/){print "malformed end anchor: " NR;bad=1;next}
+    x=substr(x,1,length(x)-1)
+    if(index(x,"|")){print "malformed end anchor: " NR;bad=1;next}
+  }
   host=x;sub(/[\/?#\^|].*$/,"",host)
 
   # Bare-domain block without the $third-party guard the Go parser always
@@ -123,6 +137,7 @@ BEGIN{bad=0}
   if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}
   else if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1}
   else if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1}
+  else if(!valid_domain(host)){print "bad hostname label or length: " NR;bad=1}
 }
 END{exit bad}
 ' "$file"

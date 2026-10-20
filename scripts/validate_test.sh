@@ -10,12 +10,16 @@ converter="${1:-$root/deps/ruleset_converter}"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 
+too_long_label="$(printf 'a%.0s' {1..64})"
+too_long_host="$(printf 'a%.0s' {1..63}).$(printf 'b%.0s' {1..63}).$(printf 'c%.0s' {1..63}).$(printf 'd%.0s' {1..62})"
+
 accept=(
   '||example.com^$third-party'
   '||example.com/path$~third-party'
   '||example.com^$script,image,third-party'
   '||example.com^$~script,~image'
   '||example.com^$domain=a.com|~bb.com'
+  '||example.com^$domain=a.example|~bb.example'
   '||example.com^$match-case,third-party'
   '@@||example.com^$document'
   '@@||example.com^$document,genericblock'
@@ -31,6 +35,8 @@ accept=(
 
 reject=(
   '||example.com^'
+  '||example.com/path|middle'
+  '||example.com/path||'
   '||example.com^$script,image,script'
   '||example.com^$third-party,~third-party'
   '||example.com^$match-case,match-case'
@@ -52,6 +58,14 @@ reject=(
   '||exa_mple.com^$third-party'
   '||example.com:8080^$third-party'
   '||localhost^$third-party'
+  '||-bad.example^$third-party'
+  '||bad-.example^$third-party'
+  '||sub.-bad.example^$third-party'
+  '||good.example^$domain=-bad.example'
+  '||good.example^$domain=bad-.example'
+  "||good.example^\$domain=${too_long_label}.example"
+  "||${too_long_label}.example^\$third-party"
+  "||${too_long_host}^\$third-party"
   'example.com##.ad'
   '/regex/'
   '||example.com^ $third-party'
