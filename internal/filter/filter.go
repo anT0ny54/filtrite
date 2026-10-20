@@ -5,7 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -16,8 +17,6 @@ type Stats struct {
 	ByReason map[string]int
 }
 
-type Builder struct{}
-
 type RuleSink func(string) error
 
 var reportSanitizer = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
@@ -26,7 +25,7 @@ var reportSanitizer = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
 // accepted rules. The sink owns downstream storage, which allows the
 // production build to use an external sorter instead of a process-wide map
 // and full in-memory rule slice.
-func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
+func ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
 	if sink == nil {
 		return Stats{}, fmt.Errorf("rule sink is nil")
 	}
@@ -46,7 +45,7 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 	defer rejFile.Close()
 	rej := bufio.NewWriterSize(rejFile, 64<<10)
 
-	if _, err := fmt.Fprintln(rej, "# line\treason\trule"); err != nil {
+	if _, err := rej.WriteString("# line\treason\trule\n"); err != nil {
 		return Stats{}, fmt.Errorf("write rejected report header: %w", err)
 	}
 
@@ -65,7 +64,9 @@ func (b Builder) ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stat
 		if !ok {
 			stats.Rejected++
 			stats.ByReason[reason]++
-			if _, err := fmt.Fprintf(rej, "%d\t%s\t%s\n", stats.Read, reason, sanitizeReport(rawLine)); err != nil {
+			// Plain concatenation avoids fmt's formatting overhead on what can
+			// be hundreds of thousands of rejected lines per source.
+			if _, err := rej.WriteString(strconv.Itoa(stats.Read) + "\t" + reason + "\t" + sanitizeReport(rawLine) + "\n"); err != nil {
 				return stats, fmt.Errorf("write rejected report: %w", err)
 			}
 			continue
@@ -112,6 +113,10 @@ var unsupportedMarkers = [...]string{
 	"+js(", ":has-text(", ":contains(", ":matches-css(", ":xpath(", ":style(",
 }
 
+// hostsPrefixes are the canonical hosts-file addresses (with the single
+// separating space) accepted by normalize.
+var hostsPrefixes = [...]string{"0.0.0.0 ", "127.0.0.1 ", "::1 "}
+
 func normalize(line string) (string, string, bool) {
 	if !utf8.ValidString(line) {
 		return "", "invalid-utf8", false
@@ -146,7 +151,7 @@ func normalize(line string) (string, string, bool) {
 	// An exception-prefixed hosts record is not representable as a block rule,
 	// so reject it before generic character validation can report a different
 	// reason.
-	for _, prefix := range []string{"0.0.0.0 ", "127.0.0.1 ", "::1 "} {
+	for _, prefix := range hostsPrefixes {
 		if strings.HasPrefix(line, prefix) {
 			if exception {
 				return "", "unsupported-exception-rule", false
@@ -205,6 +210,11 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		if !validDomain(host) {
 			return "", "", false
 		}
+		// A vertical bar is only an end anchor in domain-anchored network
+		// rules. Reject internal pipes and multiple trailing anchors.
+		if strings.Contains(rest, "|") && (!strings.HasSuffix(rest, "|") || strings.Contains(strings.TrimSuffix(rest, "|"), "|")) {
+			return "", "", false
+		}
 		switch rest {
 		case "^", "|":
 			return "||" + strings.ToLower(host) + rest + modSuffix, "", true
@@ -218,12 +228,6 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		hasEnd := strings.HasSuffix(pattern, "|")
 		plain := strings.TrimSuffix(strings.TrimPrefix(pattern, "|"), "|")
 		schemeEnd := strings.Index(plain, "://") + 3
-		if schemeEnd < 3 {
-			// Unreachable after the HasPrefix checks above ("://" is always
-			// present); the guard keeps the slice below safe if this branch
-			// is ever refactored away from those prefixes.
-			return "", "", false
-		}
 		scheme, afterScheme := plain[:schemeEnd], plain[schemeEnd:]
 		pos := strings.IndexAny(afterScheme, "/?#")
 		host, tail := afterScheme, ""
@@ -330,7 +334,7 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 
 	// Resource-type (ElementType) options: same-sign-only, see comment above.
 	// At most 12 names exist, so a linear duplicate scan beats a map.
-	var typeNegated *bool
+	var typeNegated bool
 	var typeNames []string
 
 	// Whitelist-only ActivationType options: never negated, plain set union.
@@ -361,13 +365,12 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			if hasValue || len(activationNames) > 0 {
 				return "", false
 			}
-			if containsString(typeNames, name) {
+			if slices.Contains(typeNames, name) {
 				return "", false
 			}
-			if typeNegated == nil {
-				n := negated
-				typeNegated = &n
-			} else if *typeNegated != negated {
+			if len(typeNames) == 0 {
+				typeNegated = negated
+			} else if typeNegated != negated {
 				return "", false
 			}
 			typeNames = append(typeNames, name)
@@ -378,7 +381,7 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 			if hasValue || negated || len(typeNames) > 0 || !exception {
 				return "", false
 			}
-			if containsString(activationNames, name) {
+			if slices.Contains(activationNames, name) {
 				return "", false
 			}
 			activationNames = append(activationNames, name)
@@ -421,9 +424,9 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 
 	var parts []string
 	if len(typeNames) > 0 {
-		sort.Strings(typeNames)
+		slices.Sort(typeNames)
 		prefix := ""
-		if typeNegated != nil && *typeNegated {
+		if typeNegated {
 			prefix = "~"
 		}
 		for _, n := range typeNames {
@@ -431,7 +434,7 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 		}
 	}
 	if len(activationNames) > 0 {
-		sort.Strings(activationNames)
+		slices.Sort(activationNames)
 		parts = append(parts, activationNames...)
 	}
 	if thirdParty != "" {
@@ -454,15 +457,16 @@ func parseModifiers(opts string, exception bool) (string, bool) {
 func canonicalDomainList(value string) (string, bool) {
 	entries := strings.Split(value, "|")
 	// base is the canonical entry without its "~" prefix, precomputed once
-	// so the sort comparator below does not allocate a TrimPrefix result
-	// on every comparison (O(n log n) allocations otherwise).
+	// so the sort comparator below does not allocate on every comparison.
 	type domainEntry struct {
 		canonical string
 		base      string
 	}
 	out := make([]domainEntry, 0, len(entries))
+	// A repeated base domain is always rejected, whether it is an exact
+	// duplicate ("a.example|a.example") or an include/exclude conflict
+	// ("a.example|~a.example"), so a single set covers both cases.
 	seen := make(map[string]struct{}, len(entries))
-	excludedBase := make(map[string]bool, len(entries))
 	for _, entry := range entries {
 		exclude := ""
 		domain := entry
@@ -474,30 +478,17 @@ func canonicalDomainList(value string) (string, bool) {
 			return "", false
 		}
 		base := strings.ToLower(domain)
-		canonical := exclude + base
-		if _, exists := seen[canonical]; exists {
+		if _, dup := seen[base]; dup {
 			return "", false
 		}
-		// Reject the same base domain appearing both included and
-		// excluded in one list (e.g. "foo.example|~foo.example"): that is
-		// a direct conflict, not an exact duplicate, so it is invisible to
-		// the exact-string check above.
-		if prevExcluded, exists := excludedBase[base]; exists && prevExcluded != (exclude == "~") {
-			return "", false
-		}
-		excludedBase[base] = exclude == "~"
-		seen[canonical] = struct{}{}
-		out = append(out, domainEntry{canonical: canonical, base: base})
+		seen[base] = struct{}{}
+		out = append(out, domainEntry{canonical: exclude + base, base: base})
 	}
-	if len(out) == 0 {
-		return "", false
-	}
-	sort.Slice(out, func(i, j int) bool {
-		a, b := out[i].base, out[j].base
-		if len(a) != len(b) {
-			return len(a) > len(b)
+	slices.SortFunc(out, func(a, b domainEntry) int {
+		if len(a.base) != len(b.base) {
+			return len(b.base) - len(a.base)
 		}
-		return out[i].canonical < out[j].canonical
+		return strings.Compare(a.canonical, b.canonical)
 	})
 	joined := make([]string, len(out))
 	for i := range out {
@@ -510,22 +501,16 @@ func validDomain(s string) bool {
 	if len(s) == 0 || len(s) > 253 {
 		return false
 	}
-	// Empty labels (leading/trailing dot, "..") fail the per-label length
-	// check below; the character check rejects "/?#^|" and anything else
-	// outside [A-Za-z0-9-] (case is preserved here; callers lower-case).
-	parts := strings.Split(s, ".")
-	if len(parts) < 2 {
-		return false
-	}
+	// Single pass without splitting (no per-call allocation; this runs for
+	// every candidate rule). Empty labels (leading/trailing dot, "..") fail
+	// the label-length check; any byte outside [A-Za-z0-9-] is rejected, which
+	// also covers the separators "/?#^|". Case is preserved here; callers
+	// lower-case.
+	labels, start := 0, 0
 	allNumeric := true
-	for _, part := range parts {
-		if len(part) == 0 || len(part) > 63 || part[0] == '-' || part[len(part)-1] == '-' {
-			return false
-		}
-		// Byte scan: every caller passes ASCII-only strings (normalize
-		// range-checks first; source manifests are ASCII by construction).
-		for i := 0; i < len(part); i++ {
-			c := part[i]
+	for i := 0; i <= len(s); i++ {
+		if i < len(s) && s[i] != '.' {
+			c := s[i]
 			switch {
 			case c >= '0' && c <= '9':
 			case (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '-':
@@ -533,18 +518,15 @@ func validDomain(s string) bool {
 			default:
 				return false
 			}
+			continue
 		}
-	}
-	return !allNumeric
-}
-
-func containsString(list []string, v string) bool {
-	for _, item := range list {
-		if item == v {
-			return true
+		if n := i - start; n == 0 || n > 63 || s[start] == '-' || s[i-1] == '-' {
+			return false
 		}
+		labels++
+		start = i + 1
 	}
-	return false
+	return labels >= 2 && !allNumeric
 }
 
 func sanitizeReport(s string) string {

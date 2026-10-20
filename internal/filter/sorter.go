@@ -7,7 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -270,16 +270,10 @@ func (s *ExternalSorter) flushChunk() error {
 	if len(s.rules) == 0 {
 		return nil
 	}
-	sort.Strings(s.rules)
-	unique := s.rules[:0]
-	for _, rule := range s.rules {
-		if len(unique) == 0 || unique[len(unique)-1] != rule {
-			unique = append(unique, rule)
-			continue
-		}
-		s.duplicates++
-	}
-	s.rules = unique
+	slices.Sort(s.rules)
+	n := len(s.rules)
+	s.rules = slices.Compact(s.rules)
+	s.duplicates += n - len(s.rules)
 
 	path := filepath.Join(s.dir, fmt.Sprintf(".chunk-%06d.txt", len(s.chunks)))
 	f, err := os.Create(path)

@@ -10,7 +10,7 @@ import (
 func readRules(t *testing.T, in, rej string) ([]string, Stats) {
 	t.Helper()
 	var rules []string
-	st, err := (Builder{}).ReadFileToSink(in, rej, func(rule string) error {
+	st, err := ReadFileToSink(in, rej, func(rule string) error {
 		rules = append(rules, rule)
 		return nil
 	})
@@ -551,7 +551,7 @@ func TestReadFileToSinkStreamsRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	var got []string
-	st, err := (Builder{}).ReadFileToSink(in, rej, func(rule string) error {
+	st, err := ReadFileToSink(in, rej, func(rule string) error {
 		got = append(got, rule)
 		return nil
 	})
@@ -563,5 +563,54 @@ func TestReadFileToSinkStreamsRules(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("got=%v, want 3 streamed rules", got)
+	}
+}
+
+func TestDomainAnchoredRulesRejectInternalOrRepeatedPipes(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rejected.txt")
+	input := strings.Join([]string{
+		"||internal-pipe.example/path|suffix",
+		"||repeated-pipe.example/path||",
+		"||valid-end-anchor.example/path|",
+	}, "\n")
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, stats := readRules(t, in, rej)
+	if len(rules) != 1 || rules[0] != "||valid-end-anchor.example/path|" {
+		t.Fatalf("rules=%v, want only the rule with one trailing end anchor", rules)
+	}
+	if stats.Rejected != 2 {
+		t.Fatalf("rejected=%d, want 2; reasons=%v", stats.Rejected, stats.ByReason)
+	}
+}
+
+func TestNormalizeRejectsMalformedHostnameLabelsAndLengths(t *testing.T) {
+	valid := []string{
+		"||example.com^$third-party",
+		"||a" + strings.Repeat("b", 61) + ".example^$third-party", // 62-byte label
+	}
+	for _, rule := range valid {
+		if _, reason, ok := normalize(rule); !ok {
+			t.Errorf("normalize(%q) rejected valid rule: %s", rule, reason)
+		}
+	}
+	invalid := []string{
+		"||-bad.example^$third-party",
+		"||bad-.example^$third-party",
+		"||good.example^$domain=-bad.example",
+		"||good.example^$domain=bad-.example",
+		"||good.example^$domain=" + strings.Repeat("a", 64) + ".example",
+		"||" + strings.Repeat("a", 64) + ".example^$third-party",
+		"||" + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 62) + "^$third-party",
+	}
+	for _, rule := range invalid {
+		if got, reason, ok := normalize(rule); ok {
+			t.Errorf("normalize(%q) accepted malformed rule %q", rule, got)
+		} else if reason == "" {
+			t.Errorf("normalize(%q) rejected without a reason", rule)
+		}
 	}
 }
