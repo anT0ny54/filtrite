@@ -44,6 +44,9 @@ jobs:
       - name: Run unit tests
         run: go test ./...
 
+      - name: Run static analysis
+        run: go vet ./...
+
       # Invoked via bash so the job works even if the checkout does not
       # preserve the executable bit (e.g. Windows-hosted checkouts, archives).
       - name: Build and validate
