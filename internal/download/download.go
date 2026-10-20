@@ -16,7 +16,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -81,6 +80,12 @@ func URLsFromFile(path string) ([]string, error) {
 		if rawLine != trimmed {
 			return nil, fmt.Errorf("source list line %d: leading/trailing whitespace is not allowed", lineNo)
 		}
+		// A literal '#' starts a URL fragment, which is not sent in an HTTP
+		// request. ParseRequestURI treats it as request-path/query data instead
+		// of a fragment, so reject it explicitly; encode a literal hash as %23.
+		if strings.Contains(rawLine, "#") {
+			return nil, fmt.Errorf("source list line %d: URL fragments are not allowed; percent-encode a literal '#' as %%23", lineNo)
+		}
 
 		u, err := url.ParseRequestURI(rawLine)
 		if err != nil || u.Hostname() == "" || !strings.EqualFold(u.Scheme, "https") || u.User != nil {
@@ -89,8 +94,9 @@ func URLsFromFile(path string) ([]string, error) {
 			}
 			return nil, fmt.Errorf("source list line %d: %q: %w", lineNo, rawLine, err)
 		}
-		// Hostnames are case-insensitive. Canonicalizing the host avoids
-		// duplicate downloads and duplicate cache entries for equivalent URLs.
+		// URL schemes and DNS hostnames are case-insensitive. Canonicalizing
+		// both avoids duplicate downloads/cache entries for equivalent URLs.
+		u.Scheme = strings.ToLower(u.Scheme)
 		u.Host = strings.ToLower(u.Host)
 		canonical := u.String()
 		if _, exists := seen[canonical]; exists {
@@ -133,25 +139,23 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if timeout <= 0 {
 		timeout = DefaultTimeout
 	}
-	// The per-caller staging directory only receives downloads when no
-	// shared cache is configured (workers download straight into the cache),
-	// so creating it unconditionally would resurrect directories such as
-	// build/work/<name>/raw/ that cache-enabled builds are documented never
-	// to create.
-	if cacheDir == "" {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			return nil, fmt.Errorf("create download directory: %w", err)
-		}
-	} else {
-		if err := os.MkdirAll(cacheDir, 0o755); err != nil {
-			return nil, fmt.Errorf("create source cache directory: %w", err)
-		}
-	}
+	// Reject invalid input before creating any directory.
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no URLs")
 	}
 	if len(urls) > MaxSources {
 		return nil, fmt.Errorf("too many sources")
+	}
+	// Downloads go straight into the shared cache when one is configured, so
+	// the per-caller staging directory is only created without a cache;
+	// creating it unconditionally would resurrect directories such as
+	// build/work/<name>/raw/ that cache-enabled builds never use.
+	destination := dir
+	if cacheDir != "" {
+		destination = cacheDir
+	}
+	if err := os.MkdirAll(destination, 0o755); err != nil {
+		return nil, fmt.Errorf("create download directory: %w", err)
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		// Each attempt can take up to `timeout`; cap retries so the
@@ -173,41 +177,39 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		url   string
 	}
 	results := make([]Result, len(urls))
-	budget := MaxTotalBytes
+	budget := newByteBudget(MaxTotalBytes)
 
 	// Cached files count toward the manifest budget just like fresh downloads.
 	missing := make([]job, 0, len(urls))
+	overflow := -1 // index of the first cached source that busts the budget
 	for i, rawURL := range urls {
 		if cacheDir != "" {
 			if path, n, ok := cachedFile(cacheDir, rawURL); ok {
-				if atomic.AddInt64(&budget, -n) < 0 {
-					results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true, Err: ErrTooLarge}
-				} else {
-					results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true}
+				// Cache accounting is single-threaded here; worker goroutines
+				// are started only after this scan completes.
+				results[i] = Result{URL: rawURL, Path: path, Bytes: n, Cached: true}
+				if budget.chargeCached(n) < 0 {
+					results[i].Err = ErrTooLarge
+					if overflow < 0 {
+						overflow = i
+					}
 				}
 				continue
 			}
 		}
 		missing = append(missing, job{index: i, url: rawURL})
 	}
-	// Only cached reads can have produced errors at this point (worker
-	// results do not exist yet), so skip the scan entirely when no cache
-	// directory is in use.
-	if cacheDir != "" {
-		for _, result := range results {
-			if result.Err != nil {
-				// Entries that were not cached are never fetched on this
-				// path; mark them failed so a caller using a partial build
-				// cannot count the zero-valued results as successes.
-				for i := range results {
-					if results[i].Err == nil && results[i].Path == "" {
-						results[i].URL = urls[i]
-						results[i].Err = fmt.Errorf("not downloaded: manifest byte budget exhausted by cached sources")
-					}
-				}
-				return results, fmt.Errorf("%s: %w", result.URL, result.Err)
+	if overflow >= 0 {
+		// Entries that were not cached are never fetched on this path; mark
+		// them failed so a caller using a partial build cannot count the
+		// zero-valued results as successes.
+		for i := range results {
+			if results[i].Err == nil && results[i].Path == "" {
+				results[i].URL = urls[i]
+				results[i].Err = fmt.Errorf("not downloaded: manifest byte budget exhausted by cached sources")
 			}
 		}
+		return results, fmt.Errorf("%s: %w", results[overflow].URL, ErrTooLarge)
 	}
 	if len(missing) == 0 {
 		// An all-cached build never reaches the worker loop, so re-check the
@@ -237,10 +239,6 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	}
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	destination := dir
-	if cacheDir != "" {
-		destination = cacheDir
-	}
 	for i := 0; i < workers; i++ {
 		go func() {
 			defer wg.Done()
@@ -251,7 +249,7 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 					results[j.index] = Result{URL: j.url, Err: err}
 					continue
 				}
-				path, n, err := get(ctx, c, j.url, destination, retries, &budget)
+				path, n, err := get(ctx, c, j.url, destination, retries, budget)
 				results[j.index] = Result{URL: j.url, Path: path, Bytes: n, Err: err}
 			}
 		}()
@@ -274,8 +272,10 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 }
 
 func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
-	path := filepath.Join(cacheDir, shaName(rawURL)+".txt")
-	info, err := os.Stat(path)
+	path := filepath.Join(cacheDir, SourceName(rawURL)+".txt")
+	// Cache entries are created as regular files via atomic rename. Use Lstat
+	// so a pre-existing symlink is never followed outside the configured cache.
+	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaxSourceBytes {
 		if err == nil {
 			_ = os.Remove(path)
@@ -289,7 +289,7 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 	return path, info.Size(), true
 }
 
-func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, budget *int64) (string, int64, error) {
+func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, budget *byteBudget) (string, int64, error) {
 	var last error
 	attempts := 0
 	for attempt := 0; attempt <= retries; attempt++ {
@@ -331,7 +331,7 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 	return "", 0, fmt.Errorf("after %d attempts: %w", attempts, last)
 }
 
-func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *int64) (string, int64, error) {
+func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *byteBudget) (string, int64, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return "", 0, err
@@ -353,7 +353,7 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *in
 	if resp.ContentLength > MaxSourceBytes {
 		return "", 0, ErrTooLarge
 	}
-	name := shaName(rawURL) + ".txt"
+	name := SourceName(rawURL) + ".txt"
 	final := filepath.Join(dir, name)
 	tmp, err := os.CreateTemp(dir, "."+name+".tmp-*")
 	if err != nil {
@@ -364,12 +364,12 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *in
 		_ = tmp.Close()
 		_ = os.Remove(tmpPath)
 	}()
-	reader := &budgetReader{r: io.LimitReader(resp.Body, MaxSourceBytes+1), remaining: budget}
+	reader := &budgetReader{r: io.LimitReader(resp.Body, MaxSourceBytes+1), budget: budget}
 	n, err := io.Copy(tmp, reader)
 	// The shared budget accounts for bytes that end up in published
 	// artifacts; anything discarded below is refunded so a failed or
 	// rejected download cannot silently consume the build's budget.
-	refund := func() { atomic.AddInt64(budget, n) }
+	refund := func() { budget.refund(n) }
 	if err != nil {
 		refund()
 		return "", 0, err
@@ -402,9 +402,74 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *in
 	return final, n, nil
 }
 
+// byteBudget coordinates reservations for concurrent source readers. Reserving
+// before an underlying Read prevents concurrent streams from exceeding the
+// aggregate limit; waiting when reservations are temporarily in flight avoids
+// treating a temporary zero balance as a definitive over-limit result.
+type byteBudget struct {
+	mu          sync.Mutex
+	cond        *sync.Cond
+	remaining   int64
+	activeReads int
+}
+
+func newByteBudget(limit int64) *byteBudget {
+	b := &byteBudget{remaining: limit}
+	b.cond = sync.NewCond(&b.mu)
+	return b
+}
+
+func (b *byteBudget) chargeCached(n int64) int64 {
+	b.mu.Lock()
+	b.remaining -= n
+	b.cond.Broadcast()
+	remaining := b.remaining
+	b.mu.Unlock()
+	return remaining
+}
+
+func (b *byteBudget) refund(n int64) {
+	b.mu.Lock()
+	b.remaining += n
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
+// reserve waits only while another underlying Read is actively holding bytes
+// out of the shared budget. The read's result either consumes those bytes or
+// refunds its unused reservation and wakes waiters.
+func (b *byteBudget) reserve(size int64) int64 {
+	b.mu.Lock()
+	for {
+		if b.remaining > 0 {
+			want := size
+			if want > b.remaining {
+				want = b.remaining
+			}
+			b.remaining -= want
+			b.activeReads++
+			b.mu.Unlock()
+			return want
+		}
+		if b.activeReads == 0 {
+			b.mu.Unlock()
+			return 0
+		}
+		b.cond.Wait()
+	}
+}
+
+func (b *byteBudget) settle(want, n int64) {
+	b.mu.Lock()
+	b.remaining += want - n
+	b.activeReads--
+	b.cond.Broadcast()
+	b.mu.Unlock()
+}
+
 type budgetReader struct {
-	r         io.Reader
-	remaining *int64
+	r      io.Reader
+	budget *byteBudget
 }
 
 func (r *budgetReader) Read(p []byte) (int, error) {
@@ -412,43 +477,31 @@ func (r *budgetReader) Read(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	for {
-		remaining := atomic.LoadInt64(r.remaining)
-		if remaining <= 0 {
-			// We may have consumed the final permitted byte exactly. Probe the
-			// underlying reader so an actual EOF is accepted, while any
-			// additional source byte still fails the global budget. A reader
-			// that keeps returning (0, nil) without progress is treated as
-			// stalled instead of spinning forever.
-			var probe [1]byte
-			for stalled := 0; ; stalled++ {
-				n, err := r.r.Read(probe[:])
-				if n > 0 {
-					return 0, ErrTooLarge
-				}
-				if err != nil {
-					return 0, err
-				}
-				if stalled >= 100 {
-					return 0, fmt.Errorf("download stalled: reader returned no data without error")
-				}
+	want := r.budget.reserve(int64(len(p)))
+	if want <= 0 {
+		// We may have consumed the final permitted byte exactly. Probe the
+		// underlying reader so an actual EOF is accepted, while any additional
+		// source byte still fails the global budget. A reader that keeps
+		// returning (0, nil) without progress is treated as stalled instead of
+		// spinning forever.
+		var probe [1]byte
+		for stalled := 0; ; stalled++ {
+			n, err := r.r.Read(probe[:])
+			if n > 0 {
+				return 0, ErrTooLarge
+			}
+			if err != nil {
+				return 0, err
+			}
+			if stalled >= 100 {
+				return 0, fmt.Errorf("download stalled: reader returned no data without error")
 			}
 		}
-
-		want := int64(len(p))
-		if want > remaining {
-			want = remaining
-		}
-		if !atomic.CompareAndSwapInt64(r.remaining, remaining, remaining-want) {
-			continue
-		}
-
-		n, err := r.r.Read(p[:want])
-		if unused := want - int64(n); unused > 0 {
-			atomic.AddInt64(r.remaining, unused)
-		}
-		return n, err
 	}
+
+	n, err := r.r.Read(p[:want])
+	r.budget.settle(want, int64(n))
+	return n, err
 }
 
 func htmlError(path string) bool {
@@ -493,6 +546,7 @@ func parseRetryAfter(value string, now time.Time) time.Duration {
 	}
 	return 0
 }
+
 func retryable(err error) bool {
 	if errors.Is(err, ErrTooLarge) {
 		return false
@@ -517,10 +571,12 @@ func retryable(err error) bool {
 	var netErr net.Error
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
-func shaName(s string) string { h := sha256.Sum256([]byte(s)); return hex.EncodeToString(h[:]) }
 
-// SourceName returns the stable file name (full SHA-256 hex of the URL) used
-// for source-cache entries. Callers that only need a short prefix may slice
-// the returned string; this is the single URL-hashing implementation shared
-// with cmd/legacy-filter-builder.
-func SourceName(s string) string { return shaName(s) }
+// SourceName returns the stable file name stem (full SHA-256 hex of the URL)
+// used for source-cache entries. Callers that only need a short prefix may
+// slice the returned string; this is the single URL-hashing implementation,
+// shared with cmd/legacy-filter-builder.
+func SourceName(s string) string {
+	h := sha256.Sum256([]byte(s))
+	return hex.EncodeToString(h[:])
+}

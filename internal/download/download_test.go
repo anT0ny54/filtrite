@@ -80,7 +80,7 @@ func TestURLsFromFileRejectsWhitespace(t *testing.T) {
 func TestURLsFromFileCanonicalizesHostCase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.txt")
-	input := "https://EXAMPLE.com/list.txt\nhttps://example.com/list.txt\n"
+	input := "https://EXAMPLE.com/list.txt\nhttps://example.com/list.txt\nHTTPS://example.com/list.txt\n"
 	if err := os.WriteFile(path, []byte(input), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -90,6 +90,33 @@ func TestURLsFromFileCanonicalizesHostCase(t *testing.T) {
 	}
 	if len(urls) != 1 || urls[0] != "https://example.com/list.txt" {
 		t.Fatalf("urls=%v, want one canonical URL", urls)
+	}
+}
+
+func TestURLsFromFileAllowsPercentEncodedHash(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	const want = "https://example.com/list%23fragment.txt"
+	if err := os.WriteFile(path, []byte(want+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	urls, err := URLsFromFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(urls) != 1 || urls[0] != want {
+		t.Fatalf("urls=%v, want [%q]", urls, want)
+	}
+}
+
+func TestURLsFromFileRejectsLiteralFragmentDelimiter(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	if err := os.WriteFile(path, []byte("https://example.com/list.txt#fragment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := URLsFromFile(path); err == nil || !strings.Contains(err.Error(), "URL fragments are not allowed") {
+		t.Fatalf("expected a fragment validation error, got %v", err)
 	}
 }
 
@@ -230,7 +257,7 @@ func TestGetReportsActualAttemptsAndStatusOnce(t *testing.T) {
 	srv := httptest.NewServer(http.NotFoundHandler())
 	defer srv.Close()
 
-	_, _, err := get(context.Background(), newClient(time.Second), srv.URL, t.TempDir(), 4, ptrInt64(MaxTotalBytes))
+	_, _, err := get(context.Background(), newClient(time.Second), srv.URL, t.TempDir(), 4, newByteBudget(MaxTotalBytes))
 	if err == nil {
 		t.Fatal("expected HTTP error")
 	}
@@ -276,11 +303,9 @@ func TestCachedBytesConsumeManifestBudget(t *testing.T) {
 	}
 }
 
-func ptrInt64(v int64) *int64 { return &v }
-
 func TestBudgetReaderAllowsExactEOF(t *testing.T) {
-	var remaining int64 = 3
-	reader := &budgetReader{r: strings.NewReader("abc"), remaining: &remaining}
+	budget := newByteBudget(3)
+	reader := &budgetReader{r: strings.NewReader("abc"), budget: budget}
 	buf := make([]byte, 8)
 	n, err := reader.Read(buf)
 	if n != 3 || err != nil {
@@ -293,8 +318,8 @@ func TestBudgetReaderAllowsExactEOF(t *testing.T) {
 }
 
 func TestBudgetReaderRejectsBytePastLimit(t *testing.T) {
-	var remaining int64 = 3
-	reader := &budgetReader{r: strings.NewReader("abcd"), remaining: &remaining}
+	budget := newByteBudget(3)
+	reader := &budgetReader{r: strings.NewReader("abcd"), budget: budget}
 	buf := make([]byte, 8)
 	n, err := reader.Read(buf)
 	if n != 3 || err != nil {
