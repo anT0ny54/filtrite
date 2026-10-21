@@ -23,10 +23,11 @@ type namedPath struct {
 	path string
 }
 
-func rejectAliasedPaths(input, output, logPath string) error {
+func rejectAliasedPaths(input, output, converter, logPath string) error {
 	paths := []namedPath{
 		{name: "input", path: input},
 		{name: "output", path: output},
+		{name: "converter", path: converter},
 	}
 	if logPath != "" {
 		paths = append(paths, namedPath{name: "log", path: logPath})
@@ -86,7 +87,20 @@ func Convert(ctx context.Context, o Options) error {
 	if o.Log != "" && strings.TrimSpace(o.Log) == "" {
 		return fmt.Errorf("log path must be empty or a non-blank path")
 	}
-	if err := rejectAliasedPaths(o.Input, o.Output, o.Log); err != nil {
+	// An already-canceled operation must not truncate an existing converter
+	// log or create output directories/temp files merely to fail at cmd.Run.
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("converter canceled: %w", err)
+	}
+	// Resolve PATH lookup before touching the log or output. Besides making
+	// missing converters fail without side effects, protecting this actual
+	// executable path prevents a log/output argument from truncating or
+	// replacing the converter binary itself.
+	converterPath, err := exec.LookPath(o.Converter)
+	if err != nil {
+		return fmt.Errorf("find converter %q: %w", o.Converter, err)
+	}
+	if err := rejectAliasedPaths(o.Input, o.Output, converterPath, o.Log); err != nil {
 		return err
 	}
 	outDir := filepath.Dir(o.Output) // never empty: "." for a bare filename
@@ -104,7 +118,7 @@ func Convert(ctx context.Context, o Options) error {
 	}
 	defer os.Remove(tmpPath)
 	args := []string{"--input_format=filter-list", "--output_format=unindexed-ruleset", "--input_files=" + o.Input, "--output_file=" + tmpPath}
-	cmd := exec.CommandContext(ctx, o.Converter, args...)
+	cmd := exec.CommandContext(ctx, converterPath, args...)
 	var logf *os.File
 	if o.Log != "" {
 		if err := os.MkdirAll(filepath.Dir(o.Log), 0o755); err != nil {
