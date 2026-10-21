@@ -93,3 +93,13 @@ func TestExternalSorterRejectsUseAfterFinish(t *testing.T) {
 		t.Fatal("second Finish succeeded")
 	}
 }
+
+func TestExternalSorterScalesInitialCapacityForSmallChunks(t *testing.T) {
+	sorter, err := NewExternalSorter(t.TempDir(), 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cap(sorter.rules) != 1 {
+		t.Fatalf("initial rule capacity=%d, want 1 for an 8-byte chunk", cap(sorter.rules))
+	}
+}

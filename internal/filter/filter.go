@@ -11,6 +11,8 @@ import (
 	"unicode/utf8"
 )
 
+const maxRuleLineBytes = 2 << 20
+
 type Stats struct {
 	Read     int
 	Rejected int
@@ -25,7 +27,7 @@ var reportSanitizer = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
 // accepted rules. The sink owns downstream storage, which allows the
 // production build to use an external sorter instead of a process-wide map
 // and full in-memory rule slice.
-func ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
+func ReadFileToSink(input, rejectedPath string, sink RuleSink) (stats Stats, returnErr error) {
 	if sink == nil {
 		return Stats{}, fmt.Errorf("rule sink is nil")
 	}
@@ -42,19 +44,39 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
 	if err != nil {
 		return Stats{}, fmt.Errorf("create rejected report: %w", err)
 	}
-	defer rejFile.Close()
 	rej := bufio.NewWriterSize(rejFile, 64<<10)
+	// Flush and close on every return path. A scan or sink error should not
+	// discard rejected rules buffered before the failure, and close/flush
+	// failures on the success path must be reported to the caller.
+	defer func() {
+		if err := rej.Flush(); err != nil && returnErr == nil {
+			returnErr = fmt.Errorf("write rejected report: %w", err)
+		}
+		if err := rejFile.Close(); err != nil && returnErr == nil {
+			returnErr = fmt.Errorf("close rejected report: %w", err)
+		}
+	}()
 
 	if _, err := rej.WriteString("# line\treason\trule\n"); err != nil {
 		return Stats{}, fmt.Errorf("write rejected report header: %w", err)
 	}
 
-	stats := Stats{ByReason: make(map[string]int)}
+	stats = Stats{ByReason: make(map[string]int)}
 	sc := bufio.NewScanner(in)
-	sc.Buffer(make([]byte, 64<<10), 2<<20)
-	for sc.Scan() {
+	// Leave room for the delimiter (and optional CRLF), then enforce the
+	// content limit after ScanLines has removed the line ending.
+	sc.Buffer(make([]byte, 64<<10), maxRuleLineBytes+2)
+	for lineNo := 1; sc.Scan(); lineNo++ {
+		if len(sc.Bytes()) > maxRuleLineBytes {
+			return stats, fmt.Errorf("scan %s: line exceeds %d bytes", input, maxRuleLineBytes)
+		}
 		stats.Read++
-		rawLine := strings.TrimPrefix(strings.TrimSuffix(sc.Text(), "\r"), "\uFEFF")
+		// Only a file-start BOM is ignorable. A BOM at the start of any later
+		// rule is an unexpected non-ASCII character and must be rejected.
+		rawLine := sc.Text()
+		if lineNo == 1 {
+			rawLine = strings.TrimPrefix(rawLine, "\uFEFF")
+		}
 		trimmed := strings.TrimSpace(rawLine)
 		if trimmed == "" || strings.HasPrefix(trimmed, "!") {
 			continue
@@ -77,14 +99,6 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (Stats, error) {
 	}
 	if err := sc.Err(); err != nil {
 		return stats, fmt.Errorf("scan %s: %w", input, err)
-	}
-	if err := rej.Flush(); err != nil {
-		return stats, fmt.Errorf("write rejected report: %w", err)
-	}
-	// The deferred Close above only covers early returns and discards its
-	// error; close explicitly here so a failed final write is not silent.
-	if err := rejFile.Close(); err != nil {
-		return stats, fmt.Errorf("close rejected report: %w", err)
 	}
 	return stats, nil
 }
@@ -193,11 +207,19 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 	pattern := line
 	modSuffix := ""
 	if idx := strings.LastIndexByte(line, '$'); idx >= 0 {
+		pattern = line[:idx]
+		// The single '$' delimiter separates the URL pattern from modifiers.
+		// Treating the last '$' as the separator would let malformed rules
+		// such as "||example.com/path$unknown$third-party" retain an extra
+		// delimiter in the pattern and reach Chromium's converter unchanged.
+		if strings.Contains(pattern, "$") {
+			return "", "unsupported-modifier", false
+		}
 		suffix, ok := parseModifiers(line[idx+1:], exception)
 		if !ok {
 			return "", "unsupported-modifier", false
 		}
-		pattern, modSuffix = line[:idx], suffix
+		modSuffix = suffix
 	}
 
 	if strings.HasPrefix(pattern, "||") {

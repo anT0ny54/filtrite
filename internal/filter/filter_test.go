@@ -166,6 +166,22 @@ func TestOptimizeKeepsDifferentMetadataScopes(t *testing.T) {
 	}
 }
 
+func TestNormalizeRejectsMultipleModifierDelimiters(t *testing.T) {
+	for _, rule := range []string{
+		"||example.com/path$unknown$third-party",
+		"||example.com^$third-party$match-case",
+		"|https://example.com/path$unknown$third-party",
+	} {
+		t.Run(rule, func(t *testing.T) {
+			if got, reason, ok := normalize(rule); ok {
+				t.Fatalf("normalize(%q) accepted malformed rule %q", rule, got)
+			} else if reason != "unsupported-modifier" {
+				t.Fatalf("normalize(%q) reason=%q, want unsupported-modifier", rule, reason)
+			}
+		})
+	}
+}
+
 func TestModifierHandling(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
@@ -566,6 +582,23 @@ func TestReadFileToSinkStreamsRules(t *testing.T) {
 	}
 }
 
+func TestReadFileToSinkAcceptsBOMOnlyAtFileStart(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rejected.txt")
+	input := "\uFEFF||first.example^\n\uFEFF||second.example^\n"
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rules, stats := readRules(t, in, rej)
+	if len(rules) != 1 || rules[0] != "||first.example^" {
+		t.Fatalf("rules=%v, want only the first rule with the file-start BOM removed", rules)
+	}
+	if stats.Rejected != 1 || stats.ByReason["non-ascii-or-whitespace"] != 1 {
+		t.Fatalf("stats=%+v, want the interior BOM rejected as non-ASCII", stats)
+	}
+}
+
 func TestDomainAnchoredRulesRejectInternalOrRepeatedPipes(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")
@@ -612,5 +645,58 @@ func TestNormalizeRejectsMalformedHostnameLabelsAndLengths(t *testing.T) {
 		} else if reason == "" {
 			t.Errorf("normalize(%q) rejected without a reason", rule)
 		}
+	}
+}
+
+func TestReadFileToSinkEnforcesExactLineLengthLimit(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rejected.txt")
+	const prefix = "||example.com/"
+	maxLine := prefix + strings.Repeat("a", maxRuleLineBytes-len(prefix))
+	if len(maxLine) != maxRuleLineBytes {
+		t.Fatalf("test setup produced %d-byte line, want %d", len(maxLine), maxRuleLineBytes)
+	}
+	if err := os.WriteFile(in, []byte(maxLine+"\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var accepted string
+	stats, err := ReadFileToSink(in, rej, func(rule string) error {
+		accepted = rule
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("exactly %d-byte line rejected: %v", maxRuleLineBytes, err)
+	}
+	if stats.Read != 1 || stats.Rejected != 0 || accepted != maxLine {
+		t.Fatalf("stats=%+v accepted length=%d, want one accepted %d-byte rule", stats, len(accepted), maxRuleLineBytes)
+	}
+
+	if err := os.WriteFile(in, []byte(maxLine+"a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadFileToSink(in, rej, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "line exceeds") {
+		t.Fatalf("line longer than %d bytes error=%v, want line-limit error", maxRuleLineBytes, err)
+	}
+}
+
+func TestReadFileToSinkFlushesRejectedReportOnScanError(t *testing.T) {
+	dir := t.TempDir()
+	in := filepath.Join(dir, "in.txt")
+	rej := filepath.Join(dir, "rejected.txt")
+	input := "||unterminated.example\n" + strings.Repeat("x", maxRuleLineBytes+1) + "\n"
+	if err := os.WriteFile(in, []byte(input), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := ReadFileToSink(in, rej, func(string) error { return nil }); err == nil || !strings.Contains(err.Error(), "line exceeds") {
+		t.Fatalf("ReadFileToSink error=%v, want line-limit error", err)
+	}
+	report, err := os.ReadFile(rej)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(report), "# line\treason\trule\n") || !strings.Contains(string(report), "1\tunterminated-host-rule\t||unterminated.example\n") {
+		t.Fatalf("rejected report lost buffered diagnostics after scan error: %q", report)
 	}
 }

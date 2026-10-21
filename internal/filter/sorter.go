@@ -22,6 +22,8 @@ const DefaultSortChunkBytes int64 = 8 << 20
 // file-descriptor usage never scales with the number of chunks.
 const maxMergeFanIn = 256
 
+const initialRuleCapacity = 4096
+
 type SortResult struct {
 	Rules      int
 	Duplicates int
@@ -49,10 +51,20 @@ func NewExternalSorter(dir string, chunkBytes int64) (*ExternalSorter, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create sort directory: %w", err)
 	}
+	// Keep the default chunk's fast preallocation, but don't reserve space
+	// for thousands of string headers when a caller deliberately configures a
+	// tiny chunk for low-memory operation or deterministic tests.
+	capacity := initialRuleCapacity
+	if chunkBytes < int64(initialRuleCapacity*32) {
+		capacity = int(chunkBytes / 32)
+		if capacity < 1 {
+			capacity = 1
+		}
+	}
 	return &ExternalSorter{
 		dir:        dir,
 		chunkBytes: chunkBytes,
-		rules:      make([]string, 0, 4096),
+		rules:      make([]string, 0, capacity),
 	}, nil
 }
 
