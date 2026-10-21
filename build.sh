@@ -37,6 +37,7 @@ if [[ ! -x deps/ruleset_converter ]]; then
     --fail \
     --location \
     --proto '=https' \
+    --proto-redir '=https' \
     --tlsv1.2 \
     --retry 4 \
     --retry-delay 2 \

@@ -1,38 +1,16 @@
 # Changelog
 
-This file records only the latest modified patch.
+This file records only the latest modified patch. No version is bumped here.
 
 ## [Unreleased]
 
 ### Changed (optimization)
-- `validDomain` (called for every candidate rule and `$domain=` entry) now
-  validates hostnames in a single pass instead of `strings.Split`, removing
-  one allocation per call. Accepted/rejected hostnames are unchanged.
-- `canonicalDomainList` sorts with `slices.SortFunc` instead of
-  `sort.Slice`, dropping the `sort` import from `internal/filter`.
-- The rejected-report header is written with `WriteString` instead of
-  `fmt.Fprintln`.
-
-### Removed (dead / redundant code)
-- `canonicalDomainList` kept two maps (`seen` and `excludedBase`) that
-  rejected the same inputs; one set of base domains now covers duplicates and
-  include/exclude conflicts, and the unreachable empty-result check is gone.
-- Dropped repeated `filepath.Clean` calls on paths that `pathutil.Resolve`,
-  `filepath.Abs` and `filepath.Join` already return cleaned
-  (`pathutil`, `ruleset`, `legacy-filter-builder`).
-- `legacy-filter-builder` no longer re-stats the output after
-  `ExternalSorter.Finish`, which already guarantees a non-empty file.
-- `build.sh` no longer re-checks that `deps/ruleset_converter` is executable
-  right after the install block (it either exists or the script has already
-  exited) or that `dist/<name>.dat` is non-empty (`filtrite` rejects empty
-  converter output).
+- `cmd/legacy-filter-builder`: removed the duplicate path-collision preflight that ran before the source manifest was read. The single remaining preflight (after the manifest and custom rules are known) performs every check the removed one did, including the per-source rejected-report paths, so behavior is unchanged with less redundant path resolution, stat, and pairwise comparison work per build.
+- `internal/download`: the oversize-`Content-Length` fast path in `getOnce` now drains a bounded amount of the response body, mirroring the non-2xx status path so keep-alive connections can return to the transport pool instead of being closed.
 
 ### Documentation
-- README: documented repeated-domain rejection in `$domain=` lists and where
-  the empty-output check lives.
-- No functional bugs or conflicts were found: the Go normalizer,
-  `scripts/validate.sh`, `build.sh`, the workflows and the README agree.
+- README reviewed against the current sources (retry/backoff, redirect hop limit, worker/source/byte caps, keep-alive schedule, validator contract); all statements verified accurate, and the two changes above are internal-only, so no README edits were required.
 
 ### Verification
-- The Go toolchain was not available here, so `go build`, `go vet` and
-  `go test ./...` were not run; CI runs them. `bash -n build.sh` was checked.
+- Full-source review of all 41 files; diffs reviewed against every caller and test (`TestRunRejects*` preflight tests, `TestGetReportsActualAttemptsAndStatusOnce`, budget/robustness suites) for behavioral equivalence.
+- Not re-executed in this environment: `go test ./...`, `go vet ./...`, `go test -race ./internal/download/`, and `bash scripts/validate_test.sh` should be run by CI to confirm.
