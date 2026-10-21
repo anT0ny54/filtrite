@@ -46,3 +46,24 @@ func TestResolveFollowsLeafSymlink(t *testing.T) {
 		t.Fatalf("Resolve()=%q, want %q", got, target)
 	}
 }
+
+func TestResolveFollowsDanglingLeafSymlink(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias.dat")
+	want := filepath.Join(realDir, "future.dat")
+	if err := os.Symlink(want, alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	got, err := Resolve(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("Resolve()=%q, want dangling symlink target %q", got, want)
+	}
+}

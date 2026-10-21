@@ -23,7 +23,7 @@ func Resolve(path string) (string, error) {
 	for {
 		resolved, resolveErr := filepath.EvalSymlinks(candidate)
 		if resolveErr == nil {
-			resolved = filepath.Clean(resolved)
+			// EvalSymlinks already returns a cleaned path.
 			for i := len(missing) - 1; i >= 0; i-- {
 				resolved = filepath.Join(resolved, missing[i])
 			}
@@ -31,6 +31,24 @@ func Resolve(path string) (string, error) {
 		}
 		if !os.IsNotExist(resolveErr) {
 			return "", fmt.Errorf("resolve existing path components: %w", resolveErr)
+		}
+
+		// EvalSymlinks reports not-exist when a symlink points to a target
+		// that has not been created yet. Expand that link before walking up
+		// to the nearest existing ancestor, otherwise dangling aliases evade
+		// path-collision checks for future output/log files.
+		if info, lstatErr := os.Lstat(candidate); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			target, readErr := os.Readlink(candidate)
+			if readErr != nil {
+				return "", fmt.Errorf("read symlink %q: %w", candidate, readErr)
+			}
+			if !filepath.IsAbs(target) {
+				target = filepath.Join(filepath.Dir(candidate), target)
+			}
+			candidate = filepath.Clean(target)
+			continue
+		} else if lstatErr != nil && !os.IsNotExist(lstatErr) {
+			return "", fmt.Errorf("inspect path component %q: %w", candidate, lstatErr)
 		}
 
 		parent := filepath.Dir(candidate)
