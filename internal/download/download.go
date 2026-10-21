@@ -61,6 +61,15 @@ func newClient(timeout time.Duration) *http.Client {
 }
 
 func URLsFromFile(path string) ([]string, error) {
+	// Inspect before opening: opening a named pipe for reading can block until
+	// another process connects, but a source manifest must be a regular file.
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("open source list: %w", err)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("source list %q is not a regular file", path)
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open source list: %w", err)
@@ -72,7 +81,13 @@ func URLsFromFile(path string) ([]string, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 16<<10), 1<<20)
 	for lineNo := 1; sc.Scan(); lineNo++ {
-		rawLine := strings.TrimPrefix(strings.TrimSuffix(sc.Text(), "\r"), "\uFEFF")
+		// A UTF-8 BOM is valid only at the start of the file. ScanLines already
+		// strips a trailing CR from CRLF input; don't silently erase hidden
+		// characters from the beginning of later manifest entries.
+		rawLine := sc.Text()
+		if lineNo == 1 {
+			rawLine = strings.TrimPrefix(rawLine, "\uFEFF")
+		}
 		trimmed := strings.TrimSpace(rawLine)
 		if trimmed == "" || strings.HasPrefix(trimmed, "#") {
 			continue
@@ -93,6 +108,15 @@ func URLsFromFile(path string) ([]string, error) {
 				err = fmt.Errorf("must be an HTTPS URL without embedded credentials")
 			}
 			return nil, fmt.Errorf("source list line %d: %q: %w", lineNo, rawLine, err)
+		}
+		if strings.HasSuffix(u.Host, ":") {
+			return nil, fmt.Errorf("source list line %d: %q: port must be between 1 and 65535", lineNo, rawLine)
+		}
+		if port := u.Port(); port != "" {
+			n, portErr := strconv.Atoi(port)
+			if portErr != nil || n < 1 || n > 65535 {
+				return nil, fmt.Errorf("source list line %d: %q: port must be between 1 and 65535", lineNo, rawLine)
+			}
 		}
 		// URL schemes and DNS hostnames are case-insensitive. Canonicalizing
 		// both avoids duplicate downloads/cache entries for equivalent URLs.
@@ -256,6 +280,12 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
+		// Context cancellation/deadline failure aborts the whole manifest,
+		// including cache hits discovered before the workers started. Keep the
+		// per-source results consistent with the all-cached cancellation path.
+		for i := range results {
+			results[i].Err = err
+		}
 		return results, err
 	}
 
@@ -278,7 +308,11 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > MaxSourceBytes {
 		if err == nil {
-			_ = os.Remove(path)
+			// Cache names are owned files. Remove invalid objects recursively so
+			// a stale non-empty directory at a cache filename cannot block the
+			// fresh download's atomic rename. RemoveAll removes symlinks itself
+			// rather than following their targets.
+			_ = os.RemoveAll(path)
 		}
 		return "", 0, false
 	}
@@ -351,6 +385,9 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *by
 		return "", 0, &statusError{Code: resp.StatusCode, Status: resp.Status, RetryAfter: retryAfter}
 	}
 	if resp.ContentLength > MaxSourceBytes {
+		// Drain a bounded amount of the response body so reusable connections
+		// can stay in the transport pool, mirroring the error-status path.
+		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 		return "", 0, ErrTooLarge
 	}
 	name := SourceName(rawURL) + ".txt"
@@ -379,10 +416,6 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *by
 		return "", n, ErrTooLarge
 	}
 	if n == 0 {
-		// Consistent with every other failure path: refund the (zero-byte)
-		// copy so this branch stays correct if it ever moves below other
-		// accounting.
-		refund()
 		return "", 0, fmt.Errorf("empty response")
 	}
 	if err := tmp.Close(); err != nil {

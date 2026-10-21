@@ -66,6 +66,32 @@ func TestURLsFromFileRejectsInvalidSource(t *testing.T) {
 	}
 }
 
+func TestURLsFromFileRejectsNonRegularManifest(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := URLsFromFile(dir); err == nil || !strings.Contains(err.Error(), "not a regular file") {
+		t.Fatalf("URLsFromFile error=%v, want non-regular manifest rejection", err)
+	}
+}
+
+func TestURLsFromFileRejectsInvalidPorts(t *testing.T) {
+	for _, sourceURL := range []string{
+		"https://example.com:0/list.txt",
+		"https://example.com:65536/list.txt",
+		"https://example.com:/list.txt",
+	} {
+		t.Run(sourceURL, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "sources.txt")
+			if err := os.WriteFile(path, []byte(sourceURL+"\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := URLsFromFile(path); err == nil || !strings.Contains(err.Error(), "line 1") || !strings.Contains(err.Error(), "port must be between 1 and 65535") {
+				t.Fatalf("URLsFromFile error=%v, want line-numbered invalid-port error", err)
+			}
+		})
+	}
+}
+
 func TestURLsFromFileRejectsWhitespace(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sources.txt")
@@ -90,6 +116,28 @@ func TestURLsFromFileCanonicalizesHostCase(t *testing.T) {
 	}
 	if len(urls) != 1 || urls[0] != "https://example.com/list.txt" {
 		t.Fatalf("urls=%v, want one canonical URL", urls)
+	}
+}
+
+func TestURLsFromFileAcceptsBOMOnlyAtFileStart(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sources.txt")
+	if err := os.WriteFile(path, []byte("\uFEFFhttps://first.example/list.txt\n\uFEFFhttps://second.example/list.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := URLsFromFile(path); err == nil || !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("URLsFromFile error=%v, want line-2 rejection for an interior BOM", err)
+	}
+
+	if err := os.WriteFile(path, []byte("\uFEFFhttps://first.example/list.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	urls, err := URLsFromFile(path)
+	if err != nil {
+		t.Fatalf("leading BOM rejected: %v", err)
+	}
+	if len(urls) != 1 || urls[0] != "https://first.example/list.txt" {
+		t.Fatalf("urls=%v, want one URL without the file-start BOM", urls)
 	}
 }
 
@@ -213,7 +261,7 @@ func TestAllDownloadsAndRetries(t *testing.T) {
 	if okPath == "" {
 		t.Fatal("successful download missing")
 	}
-	b, err := os.ReadFile(filepath.Clean(okPath))
+	b, err := os.ReadFile(okPath)
 	if err != nil {
 		t.Fatal(err)
 	}

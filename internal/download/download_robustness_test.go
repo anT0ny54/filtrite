@@ -70,10 +70,8 @@ func TestAllWithCacheFullyCachedHonorsCanceledContext(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err=%v, want context.Canceled even though every source is cached", err)
 	}
-	for _, r := range res {
-		if r.Err == nil {
-			t.Fatalf("result=%#v, canceled run must not report successful sources", r)
-		}
+	if len(res) != 0 {
+		t.Fatalf("results=%#v, want no results when already canceled at entry", res)
 	}
 }
 
@@ -89,9 +87,46 @@ func TestAllWithCacheFullyCachedHonorsExpiredDeadline(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err=%v, want context.DeadlineExceeded even though every source is cached", err)
 	}
-	for _, r := range res {
-		if r.Err == nil {
-			t.Fatalf("result=%#v, expired run must not report successful sources", r)
+	if len(res) != 0 {
+		t.Fatalf("results=%#v, want no results when deadline expired at entry", res)
+	}
+}
+
+func TestAllWithCacheCancellationMarksCachedResultsFailedWhenDownloadsRemain(t *testing.T) {
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	cachedURL := "https://cached.example/list.txt"
+	seedCache(t, cacheDir, []string{cachedURL})
+
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type outcome struct {
+		results []Result
+		err     error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		results, err := AllWithCache(ctx, []string{cachedURL, srv.URL}, filepath.Join(root, "out"), cacheDir, 1, 0, 5*time.Second)
+		done <- outcome{results: results, err: err}
+	}()
+	<-started
+	cancel()
+	got := <-done
+	if !errors.Is(got.err, context.Canceled) {
+		t.Fatalf("AllWithCache error=%v, want context.Canceled", got.err)
+	}
+	if len(got.results) != 2 {
+		t.Fatalf("results=%#v, want one result per source", got.results)
+	}
+	for i, result := range got.results {
+		if !errors.Is(result.Err, context.Canceled) {
+			t.Errorf("result %d error=%v, want context.Canceled", i, result.Err)
 		}
 	}
 }
@@ -434,6 +469,43 @@ func TestGetFailedPartialAttemptsDoNotConsumeBudget(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("leftover temp files after failed attempts: %v", entries)
+	}
+}
+
+func TestCachedDirectoryEntryIsDiscardedAndRedownloaded(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte("||fresh.example^\n"))
+	}))
+	defer srv.Close()
+
+	root := t.TempDir()
+	cacheDir := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cacheEntry := filepath.Join(cacheDir, SourceName(srv.URL)+".txt")
+	if err := os.Mkdir(cacheEntry, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(cacheEntry, "stale"), []byte("stale"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := AllWithCache(context.Background(), []string{srv.URL}, filepath.Join(root, "out"), cacheDir, 1, 0, 5*time.Second)
+	if err != nil {
+		t.Fatalf("AllWithCache error=%v, want invalid cache entry to be replaced", err)
+	}
+	if len(results) != 1 || results[0].Err != nil || results[0].Cached {
+		t.Fatalf("results=%#v, want one fresh successful download", results)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("server calls=%d, want one download after discarding stale directory", calls.Load())
+	}
+	got, readErr := os.ReadFile(results[0].Path)
+	if readErr != nil || string(got) != "||fresh.example^\n" {
+		t.Fatalf("downloaded body=%q err=%v", got, readErr)
 	}
 }
 
