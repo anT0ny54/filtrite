@@ -39,6 +39,8 @@ reject=(
   '||example.com/path||'
   '||example.com^$script,image,script'
   '||example.com^$third-party,~third-party'
+  '||example.com/path$unknown$third-party'
+  '||example.com^$third-party$match-case'
   '||example.com^$match-case,match-case'
   '||example.com^$domain=a.com,domain=b.com'
   '||example.com^$script,~image'

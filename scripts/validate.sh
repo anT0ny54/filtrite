@@ -35,6 +35,7 @@ BEGIN{bad=0}
   if(line~/^@@/) exception=1
   dollar=0
   if(match(line,/\$[^$]*$/)) dollar=RSTART
+  if(dollar>0 && index(line, "$")!=dollar){print "multiple modifier delimiters: " NR;bad=1;next}
   if(dollar>0){
     mods=substr(line,dollar+1)
     line=substr(line,1,dollar-1)
