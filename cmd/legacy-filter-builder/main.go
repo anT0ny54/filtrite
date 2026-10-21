@@ -49,11 +49,6 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	if summaryPath != "" && strings.TrimSpace(summaryPath) == "" {
 		return fmt.Errorf("summary path must be empty or a non-blank path")
 	}
-	// Validate the user-controlled input/output paths before touching an old
-	// summary. This also prevents a summary path from truncating an input file.
-	if err := rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, summaryPath, nil); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}
@@ -71,7 +66,9 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 			return fmt.Errorf("custom rules %q is not a regular file", custom)
 		}
 	}
-	// Include the deterministic report paths in the second check; otherwise a
+	// Validate the user-controlled input/output paths before touching an old
+	// summary; this also prevents a summary path from truncating an input
+	// file. Include the deterministic report paths in this check; otherwise a
 	// caller could accidentally make a report overwrite a manifest or output.
 	if err := rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, summaryPath, urls); err != nil {
 		return err
@@ -287,6 +284,9 @@ func rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, sum
 		if statErrs[i] != nil && !os.IsNotExist(statErrs[i]) {
 			return fmt.Errorf("stat %s path %q: %w", paths[i].name, paths[i].path, statErrs[i])
 		}
+	}
+	if statErrs[0] == nil && !infos[0].Mode().IsRegular() {
+		return fmt.Errorf("source manifest %q is not a regular file", sources)
 	}
 	for i := 0; i < len(paths); i++ {
 		for j := i + 1; j < len(paths); j++ {
