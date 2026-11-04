@@ -47,6 +47,9 @@ jobs:
       - name: Run static analysis
         run: go vet ./...
 
+      - name: Test build preflight safety
+        run: bash scripts/build_preflight_test.sh
+
       # Invoked via bash so the job works even if the checkout does not
       # preserve the executable bit (e.g. Windows-hosted checkouts, archives).
       - name: Build and validate
