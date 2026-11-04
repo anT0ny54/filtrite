@@ -7,7 +7,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -129,10 +129,7 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		fmt.Fprintln(os.Stderr, "WARNING: continuing with a partial ruleset because --allow-partial was set")
 	}
 	if successful == 0 {
-		if downloadErr != nil {
-			return fmt.Errorf("source download failed: no sources succeeded: %w", downloadErr)
-		}
-		return fmt.Errorf("source download failed: no sources succeeded")
+		return fmt.Errorf("source download failed: no sources succeeded: %w", downloadErr)
 	}
 
 	sortDir := filepath.Join(buildDir, "sort")
@@ -185,11 +182,11 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 		for k := range reasons {
 			keys = append(keys, k)
 		}
-		sort.Slice(keys, func(i, j int) bool {
-			if reasons[keys[i]] != reasons[keys[j]] {
-				return reasons[keys[i]] > reasons[keys[j]]
+		slices.SortFunc(keys, func(a, b string) int {
+			if reasons[a] != reasons[b] {
+				return reasons[b] - reasons[a]
 			}
-			return keys[i] < keys[j]
+			return strings.Compare(a, b)
 		})
 		if len(keys) > 5 {
 			keys = keys[:5]
