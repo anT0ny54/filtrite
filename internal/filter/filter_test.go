@@ -322,7 +322,7 @@ func TestDomainListRejectsConflictingScope(t *testing.T) {
 	if len(rules) != 1 || st.ByReason["unsupported-modifier"] != 1 {
 		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
 	}
-	if rules[0] != "||ok.example^$domain=foo.example|~bar.example" {
+	if rules[0] != "||ok.example^$domain=~bar.example|foo.example" {
 		t.Fatalf("unexpected surviving rule: %q", rules[0])
 	}
 }

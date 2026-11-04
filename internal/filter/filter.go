@@ -186,7 +186,9 @@ func normalize(line string) (string, string, bool) {
 			if exception {
 				return "", "unsupported-exception-rule", false
 			}
-			host := strings.TrimPrefix(line, prefix)
+			// prefix was already confirmed by HasPrefix above and is pure
+			// ASCII, so slice instead of re-scanning with TrimPrefix.
+			host := line[len(prefix):]
 			if host != "" && !strings.ContainsAny(host, " \t") && validDomain(host) {
 				return "||" + strings.ToLower(host) + "^", "", true
 			}
@@ -525,7 +527,7 @@ func canonicalDomainList(value string) (string, bool) {
 		if len(a.base) != len(b.base) {
 			return len(b.base) - len(a.base)
 		}
-		return strings.Compare(a.canonical, b.canonical)
+		return strings.Compare(a.base, b.base)
 	})
 	joined := make([]string, len(out))
 	for i := range out {
