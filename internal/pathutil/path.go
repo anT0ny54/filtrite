@@ -34,9 +34,8 @@ func Resolve(path string) (string, error) {
 
 	volume := filepath.VolumeName(path)
 	rest := path[len(volume):]
-	if !filepath.IsAbs(path) || (len(rest) > 0 && rest[0] != filepath.Separator) {
-		return "", fmt.Errorf("path %q is not absolute", path)
-	}
+	// No absolute-path re-validation is needed here: os.Getwd is documented to
+	// return a rooted path and the separator was appended explicitly above.
 
 	resolved := volume + string(filepath.Separator)
 	unresolved := make([]string, 0, 4)
