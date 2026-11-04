@@ -1,16 +1,24 @@
 # Changelog
 
-This file records only the latest modified patch. No version is bumped here.
+This file records only the latest modified patch. No project version is bumped here.
 
 ## [Unreleased]
 
-### Changed (optimization)
-- `cmd/legacy-filter-builder`: removed the duplicate path-collision preflight that ran before the source manifest was read. The single remaining preflight (after the manifest and custom rules are known) performs every check the removed one did, including the per-source rejected-report paths, so behavior is unchanged with less redundant path resolution, stat, and pairwise comparison work per build.
-- `internal/download`: the oversize-`Content-Length` fast path in `getOnce` now drains a bounded amount of the response body, mirroring the non-2xx status path so keep-alive connections can return to the transport pool instead of being closed.
+### Fixed
+- `internal/download`: `MaxRedirects` is renamed to match its meaning and the README: it is the number of redirect hops allowed (4). The guard is now `len(via) > MaxRedirects`, which refuses exactly the same requests as the previous `len(via) >= 5`; the old name and value suggested five hops.
+- `cmd/legacy-filter-builder`: the `--custom` help text called the file optional, but the default `custom-rules.txt` must exist and a missing file is a fatal error. The help text now states that requirement.
+- `custom-rules.txt`: corrected the "Cromium" typo in the header comment to "Chromium".
+
+### Removed
+- `internal/pathutil`: removed a no-op `unresolved` reset in the absolute-symlink branch. The slice is always empty at that point, because a component is only inspected while nothing before it is missing.
+- `internal/filter`: collapsed a `switch` in the `||host` normalizer whose `^`/`|` case duplicated the fall-through return. Behavior is unchanged.
+
+### Optimized
+- `internal/filter`: rejected-rule report records are written field by field through `writeRejectedLine`, which formats the line number into a stack buffer. Each rejected line no longer allocates a concatenated string.
 
 ### Documentation
-- README reviewed against the current sources (retry/backoff, redirect hop limit, worker/source/byte caps, keep-alive schedule, validator contract); all statements verified accurate, and the two changes above are internal-only, so no README edits were required.
+- README: documents that `--custom` defaults to a required `custom-rules.txt`, and how to disable custom rules with `--custom ""`.
 
 ### Verification
-- Full-source review of all 41 files; diffs reviewed against every caller and test (`TestRunRejects*` preflight tests, `TestGetReportsActualAttemptsAndStatusOnce`, budget/robustness suites) for behavioral equivalence.
-- Not re-executed in this environment: `go test ./...`, `go vet ./...`, `go test -race ./internal/download/`, and `bash scripts/validate_test.sh` should be run by CI to confirm.
+- Every file in the project was read and cross-checked against the README and the tests. The review found no functional defect in the download, sorting, normalization, or path-resolution logic. The changes above are conflicts, redundancy, and allocation fixes.
+- This environment had no Go toolchain and no network access, so nothing was compiled or executed. Before release, run `go vet ./...`, `go test ./...`, `go test -race ./internal/download/`, and `bash scripts/validate_test.sh`.
