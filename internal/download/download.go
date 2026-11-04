@@ -27,7 +27,7 @@ const (
 	MaxSourceBytes int64 = 50 << 20
 	MaxTotalBytes  int64 = 500 << 20
 	MaxSources           = 100
-	MaxRedirects         = 5
+	MaxRedirects         = 4
 	MaxRetryAfter        = 2 * time.Minute
 )
 
@@ -46,7 +46,9 @@ func newClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: tr, Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= MaxRedirects {
+			// via holds the original request plus every hop already followed, so
+			// len(via) is the number of the hop being requested (1-based).
+			if len(via) > MaxRedirects {
 				return fmt.Errorf("too many redirects")
 			}
 			if req.URL.User != nil {
