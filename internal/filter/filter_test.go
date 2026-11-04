@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode"
 )
 
 func readRules(t *testing.T, in, rej string) ([]string, Stats) {
@@ -698,5 +699,24 @@ func TestReadFileToSinkFlushesRejectedReportOnScanError(t *testing.T) {
 	}
 	if !strings.Contains(string(report), "# line\treason\trule\n") || !strings.Contains(string(report), "1\tunterminated-host-rule\t||unterminated.example\n") {
 		t.Fatalf("rejected report lost buffered diagnostics after scan error: %q", report)
+	}
+}
+
+func TestSanitizeReportRemovesControlBytesAndRepairsInvalidUTF8(t *testing.T) {
+	input := string([]byte{'a', '\t', 'b', 0, 0x1b, '[', '3', '1', 'm', '\r', '\n', 0xff}) + "safe\u202Espoof\u200B"
+	got := sanitizeReport(input)
+	if !strings.Contains(got, "a b  [31m  ") || !strings.Contains(got, "\uFFFD") {
+		t.Fatalf("sanitizeReport()=%q, want readable text and replacement rune", got)
+	}
+	if strings.ToValidUTF8(got, "\uFFFD") != got {
+		t.Fatalf("sanitizeReport() returned invalid UTF-8: %q", got)
+	}
+	for _, r := range got {
+		if !unicode.IsPrint(r) {
+			t.Fatalf("sanitizeReport() retained non-printing character U+%04X in %q", r, got)
+		}
+	}
+	if strings.Contains(got, "\u202E") || strings.Contains(got, "\u200B") {
+		t.Fatalf("sanitizeReport() retained bidi/zero-width formatting in %q", got)
 	}
 }

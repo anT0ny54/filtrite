@@ -103,3 +103,22 @@ func TestExternalSorterScalesInitialCapacityForSmallChunks(t *testing.T) {
 		t.Fatalf("initial rule capacity=%d, want 1 for an 8-byte chunk", cap(sorter.rules))
 	}
 }
+
+func TestExternalSorterFlushesOversizedSingleRuleImmediatelyAndReleasesIt(t *testing.T) {
+	dir := t.TempDir()
+	sorter, err := NewExternalSorter(filepath.Join(dir, "sort"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sorter.Add("||large.example/" + strings.Repeat("x", 128)); err != nil {
+		t.Fatal(err)
+	}
+	if len(sorter.rules) != 0 || len(sorter.chunks) != 1 {
+		t.Fatalf("after oversized Add: buffered rules=%d chunks=%d, want 0 and 1", len(sorter.rules), len(sorter.chunks))
+	}
+	for i, rule := range sorter.rules[:cap(sorter.rules)] {
+		if rule != "" {
+			t.Fatalf("sorter retained flushed rule reference at slot %d", i)
+		}
+	}
+}

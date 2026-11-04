@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -20,8 +21,6 @@ type Stats struct {
 }
 
 type RuleSink func(string) error
-
-var reportSanitizer = strings.NewReplacer("\t", " ", "\n", " ", "\r", " ")
 
 // ReadFileToSink parses and normalizes one input file without retaining its
 // accepted rules. The sink owns downstream storage, which allows the
@@ -86,9 +85,10 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (stats Stats, ret
 		if !ok {
 			stats.Rejected++
 			stats.ByReason[reason]++
-			// Plain concatenation avoids fmt's formatting overhead on what can
-			// be hundreds of thousands of rejected lines per source.
-			if _, err := rej.WriteString(strconv.Itoa(stats.Read) + "\t" + reason + "\t" + sanitizeReport(rawLine) + "\n"); err != nil {
+			// Written part by part: a source can have hundreds of thousands of
+			// rejected lines, and building a concatenated string for each one
+			// would allocate needlessly.
+			if err := writeRejectedLine(rej, stats.Read, reason, rawLine); err != nil {
 				return stats, fmt.Errorf("write rejected report: %w", err)
 			}
 			continue
@@ -101,6 +101,22 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (stats Stats, ret
 		return stats, fmt.Errorf("scan %s: %w", input, err)
 	}
 	return stats, nil
+}
+
+// writeRejectedLine appends one "line<TAB>reason<TAB>rule" record to the
+// rejected-rule report. Each field is written separately and the line number
+// is formatted into a stack buffer, so no string is built per rejected line.
+func writeRejectedLine(w *bufio.Writer, lineNo int, reason, rawLine string) error {
+	var num [20]byte
+	if _, err := w.Write(strconv.AppendInt(num[:0], int64(lineNo), 10)); err != nil {
+		return err
+	}
+	for _, field := range [...]string{"\t", reason, "\t", sanitizeReport(rawLine), "\n"} {
+		if _, err := w.WriteString(field); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func optimizeRule(rule string) string {
@@ -237,10 +253,9 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 		if strings.Contains(rest, "|") && (!strings.HasSuffix(rest, "|") || strings.Contains(strings.TrimSuffix(rest, "|"), "|")) {
 			return "", "", false
 		}
-		switch rest {
-		case "^", "|":
-			return "||" + strings.ToLower(host) + rest + modSuffix, "", true
-		case "":
+		// A domain-only rule needs a terminator ("^" or a trailing "|") so it
+		// cannot match arbitrarily far beyond the host.
+		if rest == "" {
 			return "", "unterminated-host-rule", false
 		}
 		return "||" + strings.ToLower(host) + rest + modSuffix, "", true
@@ -552,5 +567,14 @@ func validDomain(s string) bool {
 }
 
 func sanitizeReport(s string) string {
-	return reportSanitizer.Replace(s)
+	// Rejection reports may contain arbitrary bytes from downloaded lists.
+	// Keep printable Unicode, replace malformed UTF-8, and strip non-printing
+	// characters (including control bytes, bidi formatting, NUL, and terminal
+	// escape sequences) so reports stay readable when inspected.
+	return strings.Map(func(r rune) rune {
+		if !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, strings.ToValidUTF8(s, "\uFFFD"))
 }

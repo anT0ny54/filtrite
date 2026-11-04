@@ -92,6 +92,12 @@ func (s *ExternalSorter) Add(rule string) error {
 	}
 	s.rules = append(s.rules, rule)
 	s.bytes += ruleBytes
+	// A single rule may be larger than a caller's configured chunk. Keep it
+	// as a standalone disk chunk instead of retaining it in the in-memory
+	// batch until another rule arrives or Finish is called.
+	if ruleBytes > s.chunkBytes {
+		return s.flushChunk()
+	}
 	return nil
 }
 
@@ -310,6 +316,10 @@ func (s *ExternalSorter) flushChunk() error {
 		return fmt.Errorf("close sort chunk: %w", err)
 	}
 	s.chunks = append(s.chunks, path)
+	// Reslicing alone retains references to every string in the backing
+	// array. Clear them so flushed chunks can be reclaimed before the sorter
+	// finishes processing the next batch.
+	clear(s.rules)
 	s.rules = s.rules[:0]
 	s.bytes = 0
 	return nil
