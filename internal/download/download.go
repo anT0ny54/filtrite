@@ -196,8 +196,6 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 	}
 
-	c := newClient(timeout)
-	defer c.CloseIdleConnections()
 	type job struct {
 		index int
 		url   string
@@ -251,6 +249,11 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 		}
 		return results, nil
 	}
+	// Only builds that actually download need an HTTP client; constructing
+	// the transport before this point wasted one on every all-cached run.
+	c := newClient(timeout)
+	defer c.CloseIdleConnections()
+
 	// The channel holds every job, so dispatch never blocks; workers check
 	// the context before each job instead, which makes cancellation
 	// deterministic (no random select between a ready send and Done).
@@ -327,9 +330,7 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 
 func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, budget *byteBudget) (string, int64, error) {
 	var last error
-	attempts := 0
 	for attempt := 0; attempt <= retries; attempt++ {
-		attempts = attempt + 1
 		if attempt > 0 {
 			delay := time.Duration(500*(1<<min(attempt-1, 5))) * time.Millisecond
 			var status *statusError
@@ -364,7 +365,9 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 			break
 		}
 	}
-	return "", 0, fmt.Errorf("after %d attempts: %w", attempts, last)
+	// The loop only reaches this statement after running to completion, so it
+	// executed exactly retries+1 attempts; no counter variable is needed.
+	return "", 0, fmt.Errorf("after %d attempts: %w", retries+1, last)
 }
 
 func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *byteBudget) (string, int64, error) {
@@ -381,15 +384,11 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *by
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-		// Drain a bounded amount of the response body so reusable connections
-		// can stay in the transport pool before this request is retried.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		drainBody(resp)
 		return "", 0, &statusError{Code: resp.StatusCode, Status: resp.Status, RetryAfter: retryAfter}
 	}
 	if resp.ContentLength > MaxSourceBytes {
-		// Drain a bounded amount of the response body so reusable connections
-		// can stay in the transport pool, mirroring the error-status path.
-		_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
+		drainBody(resp)
 		return "", 0, ErrTooLarge
 	}
 	name := SourceName(rawURL) + ".txt"
@@ -455,9 +454,11 @@ func newByteBudget(limit int64) *byteBudget {
 }
 
 func (b *byteBudget) chargeCached(n int64) int64 {
+	// Cache accounting is single-threaded and completes before any worker
+	// goroutine starts (see AllWithCache), so no reserve waiter can exist
+	// here and waking the condition variable would be dead work.
 	b.mu.Lock()
 	b.remaining -= n
-	b.cond.Broadcast()
 	remaining := b.remaining
 	b.mu.Unlock()
 	return remaining
@@ -549,6 +550,13 @@ func htmlError(path string) bool {
 	n, _ := io.ReadFull(f, buf) // short files return ErrUnexpectedEOF with n valid
 	s := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(string(buf[:n])), "\ufeff"))
 	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body")
+}
+
+// drainBody discards a bounded prefix of resp.Body so the underlying
+// connection can return to the transport pool instead of being closed when
+// this request is retried or fails.
+func drainBody(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64<<10))
 }
 
 type statusError struct {
