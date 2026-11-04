@@ -1,0 +1,23 @@
+version: "2"
+
+# Stricter static analysis for local runs and future CI adoption. The GitHub
+# workflow currently runs `go vet`; this configuration enables the checks
+# below wherever golangci-lint is available. errcheck is intentionally not
+# enabled: the codebase deliberately discards Close/Remove errors on cleanup
+# paths, and mass-excluding those would hide real ones.
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    - govet
+    - staticcheck
+    - ineffassign
+    - unused
+    - misspell
+
+formatters:
+  enable:
+    - gofmt
+    
