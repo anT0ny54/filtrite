@@ -6,56 +6,117 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // Resolve returns an absolute, cleaned path with every existing symlink
 // component resolved. If the leaf does not exist, it resolves the nearest
-// existing ancestor and appends the missing components. This lets callers
-// detect aliases through symlinked parent directories before creating output
-// files or deleting managed directories.
+// existing ancestor and appends the missing components. Components are
+// processed from left to right so a ".." after a symlink is interpreted from
+// the symlink target, matching filesystem path resolution rather than
+// filepath.Clean's purely lexical behavior.
 func Resolve(path string) (string, error) {
-	candidate, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("make path absolute: %w", err)
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if !filepath.IsAbs(path) {
+		if filepath.VolumeName(path) != "" {
+			return "", fmt.Errorf("volume-relative path %q is ambiguous", path)
+		}
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("get working directory: %w", err)
+		}
+		// Do not use filepath.Join here: it would clean away ".." before
+		// symlinks earlier in the input have been resolved.
+		path = cwd + string(filepath.Separator) + path
 	}
 
-	var missing []string
-	for {
-		resolved, resolveErr := filepath.EvalSymlinks(candidate)
-		if resolveErr == nil {
-			// EvalSymlinks already returns a cleaned path.
-			for i := len(missing) - 1; i >= 0; i-- {
-				resolved = filepath.Join(resolved, missing[i])
-			}
-			return resolved, nil
-		}
-		if !os.IsNotExist(resolveErr) {
-			return "", fmt.Errorf("resolve existing path components: %w", resolveErr)
-		}
+	volume := filepath.VolumeName(path)
+	rest := path[len(volume):]
+	if !filepath.IsAbs(path) || (len(rest) > 0 && rest[0] != filepath.Separator) {
+		return "", fmt.Errorf("path %q is not absolute", path)
+	}
 
-		// EvalSymlinks reports not-exist when a symlink points to a target
-		// that has not been created yet. Expand that link before walking up
-		// to the nearest existing ancestor, otherwise dangling aliases evade
-		// path-collision checks for future output/log files.
-		if info, lstatErr := os.Lstat(candidate); lstatErr == nil && info.Mode()&os.ModeSymlink != 0 {
-			target, readErr := os.Readlink(candidate)
-			if readErr != nil {
-				return "", fmt.Errorf("read symlink %q: %w", candidate, readErr)
-			}
-			if !filepath.IsAbs(target) {
-				target = filepath.Join(filepath.Dir(candidate), target)
-			}
-			candidate = filepath.Clean(target)
+	resolved := volume + string(filepath.Separator)
+	unresolved := make([]string, 0, 4)
+	parts := splitComponents(rest)
+	symlinkCount := 0
+
+	for i := 0; i < len(parts); i++ {
+		part := parts[i]
+		switch part {
+		case "", ".":
 			continue
-		} else if lstatErr != nil && !os.IsNotExist(lstatErr) {
-			return "", fmt.Errorf("inspect path component %q: %w", candidate, lstatErr)
+		case "..":
+			if len(unresolved) > 0 {
+				unresolved = unresolved[:len(unresolved)-1]
+			} else {
+				parent := filepath.Dir(resolved)
+				if parent != resolved {
+					resolved = parent
+				}
+			}
+			continue
 		}
 
-		parent := filepath.Dir(candidate)
-		if parent == candidate {
-			return "", fmt.Errorf("resolve path %q: no existing ancestor", path)
+		// Once a component is missing, later components cannot be inspected
+		// safely. Preserve them lexically, while still allowing a following
+		// ".." to cancel a missing component.
+		if len(unresolved) > 0 {
+			unresolved = append(unresolved, part)
+			continue
 		}
-		missing = append(missing, filepath.Base(candidate))
-		candidate = parent
+
+		candidate := filepath.Join(resolved, part)
+		info, err := os.Lstat(candidate)
+		if err != nil {
+			if os.IsNotExist(err) {
+				unresolved = append(unresolved, part)
+				continue
+			}
+			return "", fmt.Errorf("inspect path component %q: %w", candidate, err)
+		}
+
+		if info.Mode()&os.ModeSymlink == 0 {
+			resolved = candidate
+			continue
+		}
+
+		symlinkCount++
+		if symlinkCount > 255 {
+			return "", fmt.Errorf("resolve path %q: too many symlink components", path)
+		}
+		target, err := os.Readlink(candidate)
+		if err != nil {
+			return "", fmt.Errorf("read symlink %q: %w", candidate, err)
+		}
+
+		remaining := append([]string(nil), parts[i+1:]...)
+		// unresolved is necessarily empty here: a component is only inspected
+		// while nothing before it is missing, so it never needs resetting.
+		if filepath.IsAbs(target) {
+			volume = filepath.VolumeName(target)
+			targetRest := target[len(volume):]
+			resolved = volume + string(filepath.Separator)
+			parts = append(splitComponents(targetRest), remaining...)
+		} else {
+			if filepath.VolumeName(target) != "" {
+				return "", fmt.Errorf("resolve symlink %q: volume-relative target %q is ambiguous", candidate, target)
+			}
+			// A relative link target is interpreted from the link's parent,
+			// which is still held in resolved.
+			parts = append(splitComponents(target), remaining...)
+		}
+		i = -1
 	}
+
+	for _, part := range unresolved {
+		resolved = filepath.Join(resolved, part)
+	}
+	return resolved, nil
+}
+
+func splitComponents(path string) []string {
+	return strings.Split(strings.TrimLeft(path, string(filepath.Separator)), string(filepath.Separator))
 }

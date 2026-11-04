@@ -67,3 +67,47 @@ func TestResolveFollowsDanglingLeafSymlink(t *testing.T) {
 		t.Fatalf("Resolve()=%q, want dangling symlink target %q", got, want)
 	}
 }
+
+func TestResolveProcessesParentAfterSymlink(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real", "sub")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	// Build this string without filepath.Join, which would erase the ".."
+	// before Resolve can apply filesystem (symlink-aware) semantics.
+	path := aliasDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "future.dat"
+	got, err := Resolve(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(root, "real", "future.dat")
+	if got != want {
+		t.Fatalf("Resolve()=%q, want %q", got, want)
+	}
+}
+
+func TestResolveProcessesParentAfterDanglingSymlink(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(filepath.Join(realDir, "missing", "sub"), alias); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	path := alias + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "future.dat"
+	got, err := Resolve(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(realDir, "missing", "future.dat")
+	if got != want {
+		t.Fatalf("Resolve()=%q, want dangling-target-relative path %q", got, want)
+	}
+}
