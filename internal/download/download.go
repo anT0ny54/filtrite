@@ -330,6 +330,10 @@ func cachedFile(cacheDir, rawURL string) (string, int64, bool) {
 
 func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, budget *byteBudget) (string, int64, error) {
 	var last error
+	// attempts counts the requests actually issued: a non-retryable failure
+	// (e.g. 404) or context cancellation can end the loop long before
+	// retries+1, and callers surface this count in error messages.
+	attempts := 0
 	for attempt := 0; attempt <= retries; attempt++ {
 		if attempt > 0 {
 			delay := time.Duration(500*(1<<min(attempt-1, 5))) * time.Millisecond
@@ -351,6 +355,7 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 			}
 		}
 		p, n, e := getOnce(ctx, c, rawURL, dir, budget)
+		attempts++
 		if e == nil {
 			return p, n, nil
 		}
@@ -365,9 +370,9 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 			break
 		}
 	}
-	// The loop only reaches this statement after running to completion, so it
-	// executed exactly retries+1 attempts; no counter variable is needed.
-	return "", 0, fmt.Errorf("after %d attempts: %w", retries+1, last)
+	// Report the attempts actually issued; the loop may have exited early on
+	// a non-retryable error or a canceled context.
+	return "", 0, fmt.Errorf("after %d attempts: %w", attempts, last)
 }
 
 func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *byteBudget) (string, int64, error) {
