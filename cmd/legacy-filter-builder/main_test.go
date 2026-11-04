@@ -293,3 +293,136 @@ func TestRunRejectsInputAliasedThroughSymlinkedSortDirectory(t *testing.T) {
 		t.Fatalf("source manifest changed: %q", got)
 	}
 }
+
+func TestRunRejectsSymlinkedRejectedReportPath(t *testing.T) {
+	dir := t.TempDir()
+	sources := filepath.Join(dir, "sources.txt")
+	buildDir := filepath.Join(dir, "work")
+	output := filepath.Join(dir, "filters.txt")
+	const sourceURL = "https://example.com/list.txt"
+	if err := os.WriteFile(sources, []byte(sourceURL+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(dir, "outside.txt")
+	const sentinel = "preserve this unrelated file\n"
+	if err := os.WriteFile(outside, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reportPath := rejectedReportPath(buildDir, sourceURL)
+	if err := os.Symlink(outside, reportPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := run(sources, "", output, buildDir, "", "", false, filter.DefaultSortChunkBytes)
+	if err == nil || !strings.Contains(err.Error(), "source rejection report path must not be a symlink") {
+		t.Fatalf("run error=%v, want symlinked report-path rejection", err)
+	}
+	got, readErr := os.ReadFile(outside)
+	if readErr != nil || string(got) != sentinel {
+		t.Fatalf("unrelated symlink target changed: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestRunRejectsSymlinkedSortDirectoryBeforeCleaningIt(t *testing.T) {
+	dir := t.TempDir()
+	sources := filepath.Join(dir, "sources.txt")
+	buildDir := filepath.Join(dir, "work")
+	output := filepath.Join(dir, "filters.txt")
+	if err := os.WriteFile(sources, []byte("https://example.com/list.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	externalDir := filepath.Join(dir, "external")
+	if err := os.MkdirAll(externalDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(externalDir, ".chunk-000000.txt")
+	const sentinel = "preserve external scratch data\n"
+	if err := os.WriteFile(sentinelPath, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(externalDir, filepath.Join(buildDir, "sort")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	err := run(sources, "", output, buildDir, "", "", false, filter.DefaultSortChunkBytes)
+	if err == nil || !strings.Contains(err.Error(), "sort temporary directory path must not be a symlink") {
+		t.Fatalf("run error=%v, want symlinked sort-directory rejection", err)
+	}
+	got, readErr := os.ReadFile(sentinelPath)
+	if readErr != nil || string(got) != sentinel {
+		t.Fatalf("external sort target changed: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestRunRejectsNonDirectorySortPathWithoutDeletingIt(t *testing.T) {
+	dir := t.TempDir()
+	sources := filepath.Join(dir, "sources.txt")
+	buildDir := filepath.Join(dir, "work")
+	output := filepath.Join(dir, "filters.txt")
+	if err := os.WriteFile(sources, []byte("https://example.com/list.txt\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sortPath := filepath.Join(buildDir, "sort")
+	const sentinel = "preserve unexpected file\n"
+	if err := os.WriteFile(sortPath, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	err := run(sources, "", output, buildDir, "", "", false, filter.DefaultSortChunkBytes)
+	if err == nil || !strings.Contains(err.Error(), "sort temporary directory path is not a directory") {
+		t.Fatalf("run error=%v, want non-directory sort-path rejection", err)
+	}
+	got, readErr := os.ReadFile(sortPath)
+	if readErr != nil || string(got) != sentinel {
+		t.Fatalf("unexpected sort-path file changed: got=%q err=%v", got, readErr)
+	}
+}
+
+func TestRunRejectsOutputAliasedThroughSymlinkThenParent(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "real", "sub")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	aliasDir := filepath.Join(root, "alias")
+	if err := os.Symlink(realDir, aliasDir); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	sources := filepath.Join(root, "real", "sources.txt")
+	const sourceURL = "https://cached.example/list.txt"
+	const manifest = sourceURL + "\n"
+	if err := os.WriteFile(sources, []byte(manifest), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cacheDir := filepath.Join(root, "cache")
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256([]byte(sourceURL))
+	cacheEntry := filepath.Join(cacheDir, hex.EncodeToString(sum[:])+".txt")
+	if err := os.WriteFile(cacheEntry, []byte("||cached.example^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Keep the raw "alias/.." spelling: filepath.Join would clean it before
+	// the path resolver could apply symlink-aware filesystem semantics.
+	output := aliasDir + string(os.PathSeparator) + ".." + string(os.PathSeparator) + "sources.txt"
+	err := run(sources, "", output, filepath.Join(root, "work"), cacheDir, "", false, filter.DefaultSortChunkBytes)
+	if err == nil || !strings.Contains(err.Error(), "source manifest and output paths must not alias") {
+		t.Fatalf("run error=%v, want symlink/parent path-alias rejection", err)
+	}
+	got, readErr := os.ReadFile(sources)
+	if readErr != nil || string(got) != manifest {
+		t.Fatalf("source manifest changed during alias preflight: got=%q err=%v", got, readErr)
+	}
+}

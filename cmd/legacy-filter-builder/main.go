@@ -18,7 +18,7 @@ import (
 
 func main() {
 	sources := flag.String("sources", "lists/adblock.txt", "HTTPS source list")
-	custom := flag.String("custom", "custom-rules.txt", "optional local custom rules; empty disables")
+	custom := flag.String("custom", "custom-rules.txt", "custom rules file, which must exist; an empty value disables custom rules")
 	output := flag.String("output", "filters/adblock.txt", "generated legacy-compatible filter-list")
 	buildDir := flag.String("build-dir", "build/work/adblock", "build/report directory")
 	cacheDir := flag.String("cache-dir", "", "optional shared source-download cache directory")
@@ -49,9 +49,6 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	if summaryPath != "" && strings.TrimSpace(summaryPath) == "" {
 		return fmt.Errorf("summary path must be empty or a non-blank path")
 	}
-	if err := os.MkdirAll(buildDir, 0o755); err != nil {
-		return err
-	}
 	urls, err := download.URLsFromFile(sources)
 	if err != nil {
 		return err
@@ -76,6 +73,12 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	// Clear the previous success summary only after all input and generated
 	// report paths are known and verified not to collide.
 	if err := clearStaleSummary(summaryPath); err != nil {
+		return err
+	}
+	// Create the work directory only after all generated paths have passed
+	// collision and object-type checks. This keeps a malformed build path
+	// from creating or cleaning a directory before preflight completes.
+	if err := os.MkdirAll(buildDir, 0o755); err != nil {
 		return err
 	}
 	// Snapshots land in the shared cache directory whenever one is
@@ -133,8 +136,13 @@ func run(sources, custom, outFile, buildDir, cacheDir, summaryPath string, allow
 	}
 
 	sortDir := filepath.Join(buildDir, "sort")
-	// The deferred RemoveAll is the only cleanup needed: NewExternalSorter
-	// creates the directory, and Finish removes the chunks it created.
+	// The sort directory is owned scratch space. Clear leftovers from an
+	// interrupted earlier run so the current sorter starts with an isolated
+	// scratch tree; path preflight has verified that it is a real directory
+	// and that no input/output/cache path overlaps it.
+	if err := os.RemoveAll(sortDir); err != nil {
+		return fmt.Errorf("clear sort temporary directory: %w", err)
+	}
 	defer func() { _ = os.RemoveAll(sortDir) }()
 	sorter, err := filter.NewExternalSorter(sortDir, sortChunkBytes)
 	if err != nil {
@@ -222,10 +230,11 @@ func rejectedReportPath(buildDir, sourceURL string) string {
 }
 
 type builderPath struct {
-	name      string
-	path      string
-	generated bool
-	ownsTree  bool
+	name         string
+	path         string
+	generated    bool
+	ownsTree     bool
+	allowSymlink bool
 }
 
 // rejectAliasedBuilderPaths prevents generated files from overwriting inputs
@@ -238,8 +247,9 @@ func rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, sum
 		paths = append(paths, builderPath{name: "custom rules", path: custom})
 	}
 	paths = append(paths, builderPath{name: "output", path: outFile, generated: true})
-	// These directories are deleted during a normal builder run. Reject inputs
-	// and outputs anywhere under them, not just paths equal to the directory.
+	// These managed directories are cleaned or written during a normal builder
+	// run. Reject inputs and outputs anywhere under them, not just paths equal
+	// to the directory.
 	paths = append(paths, builderPath{
 		name: "sort temporary directory", path: filepath.Join(buildDir, "sort"), generated: true, ownsTree: true,
 	})
@@ -247,7 +257,7 @@ func rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, sum
 		// Cache entries are written under this directory. Keep all inputs and
 		// final/generated paths outside it so cached files cannot overwrite them.
 		paths = append(paths, builderPath{
-			name: "shared cache directory", path: cacheDir, generated: true, ownsTree: true,
+			name: "shared cache directory", path: cacheDir, generated: true, ownsTree: true, allowSymlink: true,
 		})
 	} else {
 		paths = append(paths, builderPath{
@@ -275,6 +285,36 @@ func rejectAliasedBuilderPaths(sources, custom, outFile, buildDir, cacheDir, sum
 	infos := make([]os.FileInfo, len(paths))
 	statErrs := make([]error, len(paths))
 	for i := range paths {
+		// Generated leaf files are opened or replaced by this builder, and the
+		// sort/raw directories are recursively managed. Reject a symlink at
+		// those leaf paths rather than accidentally writing through it or
+		// cleaning an unexpected object. A shared cache directory is the one
+		// exception: callers may intentionally place it behind a directory
+		// symlink, but its target must still be a directory. Symlinked parent
+		// components remain supported and are resolved below.
+		if paths[i].generated {
+			info, lstatErr := os.Lstat(paths[i].path)
+			if lstatErr != nil && !os.IsNotExist(lstatErr) {
+				return fmt.Errorf("inspect %s path %q: %w", paths[i].name, paths[i].path, lstatErr)
+			}
+			if lstatErr == nil {
+				if info.Mode()&os.ModeSymlink != 0 {
+					if !paths[i].allowSymlink {
+						return fmt.Errorf("%s path must not be a symlink: %s", paths[i].name, paths[i].path)
+					}
+					info, lstatErr = os.Stat(paths[i].path)
+					if lstatErr != nil {
+						return fmt.Errorf("inspect %s symlink target %q: %w", paths[i].name, paths[i].path, lstatErr)
+					}
+				}
+				if paths[i].ownsTree && !info.IsDir() {
+					return fmt.Errorf("%s path is not a directory: %s", paths[i].name, paths[i].path)
+				}
+				if !paths[i].ownsTree && !info.Mode().IsRegular() {
+					return fmt.Errorf("%s path is not a regular file: %s", paths[i].name, paths[i].path)
+				}
+			}
+		}
 		resolvedPath, err := pathutil.Resolve(paths[i].path)
 		if err != nil {
 			return fmt.Errorf("resolve %s path %q: %w", paths[i].name, paths[i].path, err)
