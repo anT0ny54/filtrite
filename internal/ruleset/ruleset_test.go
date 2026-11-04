@@ -138,6 +138,35 @@ func TestConvertRejectsOutputAndLogAliasedThroughDanglingSymlink(t *testing.T) {
 	}
 }
 
+func TestConvertRejectsUnaliasedSymlinkedLogLeaf(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "outside.log")
+	const sentinel = "do not truncate\n"
+	if err := os.WriteFile(target, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(root, "converter.log")
+	if err := os.Symlink(target, logPath); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	output := filepath.Join(root, "output.dat")
+
+	err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: output, Log: logPath})
+	if err == nil || !strings.Contains(err.Error(), "log path must not be a symlink") {
+		t.Fatalf("Convert error=%v, want unaliased log-symlink rejection", err)
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != sentinel {
+		t.Fatalf("external log target changed: got=%q err=%v", got, readErr)
+	}
+	if _, statErr := os.Stat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("output was created despite log-symlink rejection: stat=%v", statErr)
+	}
+}
+
 func TestConvertMissingConverterLeavesLogAndOutputUntouched(t *testing.T) {
 	root := t.TempDir()
 	input := filepath.Join(root, "input.txt")

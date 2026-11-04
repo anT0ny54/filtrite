@@ -103,9 +103,18 @@ func Convert(ctx context.Context, o Options) error {
 	if err := rejectAliasedPaths(o.Input, o.Output, converterPath, o.Log); err != nil {
 		return err
 	}
+	if o.Log != "" {
+		info, err := os.Lstat(o.Log)
+		switch {
+		case err == nil && info.Mode()&os.ModeSymlink != 0:
+			return fmt.Errorf("log path must not be a symlink: %s", o.Log)
+		case err != nil && !os.IsNotExist(err):
+			return fmt.Errorf("stat log path: %w", err)
+		}
+	}
 	outDir := filepath.Dir(o.Output) // never empty: "." for a bare filename
 	if err := os.MkdirAll(outDir, 0o755); err != nil {
-		return err
+		return fmt.Errorf("create output directory: %w", err)
 	}
 	tmp, err := os.CreateTemp(outDir, "."+filepath.Base(o.Output)+".tmp-*")
 	if err != nil {
@@ -116,7 +125,7 @@ func Convert(ctx context.Context, o Options) error {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temporary output: %w", err)
 	}
-	defer os.Remove(tmpPath)
+	defer func() { _ = os.Remove(tmpPath) }()
 	args := []string{"--input_format=filter-list", "--output_format=unindexed-ruleset", "--input_files=" + o.Input, "--output_file=" + tmpPath}
 	cmd := exec.CommandContext(ctx, converterPath, args...)
 	var logf *os.File
@@ -146,7 +155,7 @@ func Convert(ctx context.Context, o Options) error {
 		return fmt.Errorf("converter failed: %w", runErr)
 	}
 	if closeErr != nil {
-		return closeErr
+		return fmt.Errorf("close converter log: %w", closeErr)
 	}
 	info, err := os.Stat(tmpPath)
 	if err != nil {
