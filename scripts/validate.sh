@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 file="${1:-filters/adblock.txt}"
-[[ -s "$file" ]] || { echo "ERROR: missing/empty $file" >&2; exit 1; }
+[[ -f "$file" && -r "$file" && -s "$file" ]] || {
+  printf 'ERROR: %s must be a readable, non-empty regular file\n' "$file" >&2
+  exit 1
+}
 awk '
 function valid_domain(host,    n, labels, i, label, all_numeric) {
   if(length(host)==0 || length(host)>253)return 0
@@ -97,7 +100,7 @@ BEGIN{bad=0}
     # character-set check below, matching validAnchoredTail in filter.go.
     if(url~/\|$/) url=substr(url,1,length(url)-1)
 
-    if(url!~/^https?:\/\/[A-Za-z0-9.-]+([\/?#][A-Za-z0-9._~!$&()*+,;=:@%\/?#-]*)?$/){
+    if(url!~/^https?:\/\/[A-Za-z0-9.-]+([\/?#][A-Za-z0-9._~!&()*+,;=:@%\/?#-]*)?$/){
       print "malformed anchored URL: " NR;bad=1;next
     }
     if(url~/%([^0-9A-Fa-f]|$)|%[0-9A-Fa-f]([^0-9A-Fa-f]|$)/){
@@ -120,12 +123,15 @@ BEGIN{bad=0}
   if(line~/^@@\|\|/){x=substr(line,5)} else if(line~/^\|\|/){x=substr(line,3)} else {print "unsupported prefix: " NR;bad=1;next}
   # In domain-anchored network rules, `|` can only be one final end anchor.
   # Strip that one for host parsing and reject internal/repeated pipes.
+  end_anchor=0
   if(index(x,"|")){
     if(x !~ /\|$/){print "malformed end anchor: " NR;bad=1;next}
     x=substr(x,1,length(x)-1)
     if(index(x,"|")){print "malformed end anchor: " NR;bad=1;next}
+    end_anchor=1
   }
   host=x;sub(/[\/?#\^|].*$/,"",host)
+  if(x==host && !end_anchor){print "unterminated host rule: " NR;bad=1;next}
 
   # Bare-domain block without the $third-party guard the Go parser always
   # emits. The hostname shape mirrors validDomain in internal/filter: at

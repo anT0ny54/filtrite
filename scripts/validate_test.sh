@@ -18,6 +18,7 @@ cat >"$work/good.txt" <<'RULES'
 ||tracker.example^$third-party
 @@||cdn.example.com^$document
 |https://example.com/ads.js|
+|https://example.com/price%24sale.js|
 ||ads.example.com/path$script,image
 RULES
 bash "$root/scripts/validate.sh" "$work/good.txt" >/dev/null
@@ -48,6 +49,12 @@ RULES
 cat >"$work/bad-ip.txt" <<'RULES'
 ||1.2.3.4^$third-party
 RULES
+cat >"$work/bad-raw-dollar.txt" <<'RULES'
+|https://example.com/price$sale.js|
+RULES
+cat >"$work/bad-unterminated-host.txt" <<'RULES'
+||example.com
+RULES
 
 for bad in "$work"/bad-*.txt; do
   if bash "$root/scripts/validate.sh" "$bad" >/dev/null 2>&1; then
@@ -55,6 +62,16 @@ for bad in "$work"/bad-*.txt; do
     exit 1
   fi
 done
+
+# The validator reads generated regular files only; it must reject a FIFO
+# before awk attempts to read from it.
+if command -v mkfifo >/dev/null 2>&1; then
+  mkfifo "$work/filter-pipe"
+  if bash "$root/scripts/validate.sh" "$work/filter-pipe" >/dev/null 2>&1; then
+    echo "FAIL: validator accepted a FIFO input" >&2
+    exit 1
+  fi
+fi
 
 # Cross-check with Chromium's real parser when a converter is available.
 converter="$root/deps/ruleset_converter"

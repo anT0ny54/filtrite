@@ -10,7 +10,7 @@ mkdir -p "$fakebin"
 cat >"$fakebin/go" <<'GO'
 #!/usr/bin/env bash
 if [[ "${1:-}" == env && "${2:-}" == GOVERSION ]]; then
-  printf '%s\n' "${FAKE_GO_VERSION:-go1.27.1}"
+  printf '%s\n' "${FAKE_GO_VERSION:-go1.27.4}"
   exit 0
 fi
 printf 'unexpected go invocation during rejected preflight: %s\n' "$*" >&2
@@ -35,7 +35,7 @@ run_expect_failure() {
   local expected="$1"
   shift
   local log="$work/build.log"
-  if (cd "$repo" && env PATH="$fakebin:$PATH" FAKE_GO_VERSION="${FAKE_GO_VERSION:-go1.27.1}" "$@" bash ./build.sh) >"$log" 2>&1; then
+  if (cd "$repo" && env PATH="$fakebin:$PATH" FAKE_GO_VERSION="${FAKE_GO_VERSION:-go1.27.4}" "$@" bash ./build.sh) >"$log" 2>&1; then
     echo "FAIL: build.sh unexpectedly succeeded (expected: $expected)" >&2
     cat "$log" >&2
     exit 1
@@ -95,7 +95,7 @@ assert_generated_sentinels_preserved
 # A symlinked build root would make rm -rf build/work operate outside the repo.
 new_fixture build-root-symlink
 external="$work/external-build"
-mkdir -p "$external/work" "$repo/build-parent"
+mkdir -p "$external/work"
 printf 'keep external work\n' >"$external/work/sentinel.txt"
 rm -rf "$repo/build"
 ln -s "$external" "$repo/build"
@@ -172,9 +172,62 @@ new_fixture converter-url-bad-label-boundary
 run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env CONVERTER_URL=https://-bad.example.com/download.zip
 assert_generated_sentinels_preserved
 
-# A prerelease or decorated GOVERSION string is not a stable Go 1.27.1+ toolchain.
+# Bracketed hosts must be syntactically valid IPv6 literals, not merely strings
+# made from hexadecimal characters, colons, and dots.
+new_fixture converter-url-invalid-ipv6-groups
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env 'CONVERTER_URL=https://[::::]/download.zip'
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-multiple-ipv6-compression
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env 'CONVERTER_URL=https://[1::2::3]/download.zip'
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-invalid-ipv4-tail
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env 'CONVERTER_URL=https://[::ffff:192.0.2.256]/download.zip'
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-ipv4-tail-trailing-dot
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env 'CONVERTER_URL=https://[::ffff:192.0.2.1.]/download.zip'
+assert_generated_sentinels_preserved
+
+# A numeric dotted host is interpreted as an IPv4 literal, not a DNS name;
+# malformed octets must fail before cleanup while a valid address reaches
+# the subsequent port check.
+new_fixture converter-url-invalid-ipv4
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env 'CONVERTER_URL=https://999.999.999.999/download.zip'
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-ipv4-valid
+run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env 'CONVERTER_URL=https://192.0.2.1:65536/download.zip'
+assert_generated_sentinels_preserved
+
+# Four 63-character labels exceed the DNS maximum total hostname length.
+long_label="$(printf '%063s' '' | tr ' ' a)"
+long_host="$long_label.$long_label.$long_label.$long_label"
+new_fixture converter-url-host-too-long
+run_expect_failure 'CONVERTER_URL must be HTTPS with a valid host' env "CONVERTER_URL=https://$long_host/download.zip"
+assert_generated_sentinels_preserved
+
+# A valid IPv6 literal is accepted by host parsing; this later port error proves
+# the literal itself passed validation without starting a network request.
+new_fixture converter-url-ipv6-valid-host
+run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env 'CONVERTER_URL=https://[2001:db8::1]:65536/download.zip'
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-ipv6-ipv4-tail-valid
+run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env 'CONVERTER_URL=https://[::ffff:192.0.2.1]:65536/download.zip'
+assert_generated_sentinels_preserved
+
+# The DNS maximum is inclusive: 253 characters pass host validation.
+label_61="$(printf '%061s' '' | tr ' ' b)"
+max_host="$long_label.$long_label.$long_label.$label_61"
+new_fixture converter-url-host-at-limit
+run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env "CONVERTER_URL=https://$max_host:65536/download.zip"
+assert_generated_sentinels_preserved
+
+# A prerelease or decorated GOVERSION string is not a stable Go 1.27.4+ toolchain.
 new_fixture go-prerelease
-FAKE_GO_VERSION=go1.27.1rc1 run_expect_failure 'unrecognized Go toolchain version'
+FAKE_GO_VERSION=go1.27.4rc1 run_expect_failure 'unrecognized Go toolchain version'
 assert_generated_sentinels_preserved
 
 # Invalid user configuration is caught before removing prior output as well.
@@ -186,8 +239,8 @@ new_fixture bad-size-limit
 run_expect_failure 'MAX_RULESET_BYTES must be a positive decimal integer' env MAX_RULESET_BYTES=0
 assert_generated_sentinels_preserved
 
-new_fixture old-go
-FAKE_GO_VERSION=go1.26.0 run_expect_failure 'Go 1.27.1 or newer is required'
+new_fixture old-go-patch
+FAKE_GO_VERSION=go1.27.3 run_expect_failure 'Go 1.27.4 or newer is required'
 assert_generated_sentinels_preserved
 
-echo 'OK: build preflight regression tests passed (19 cases)'
+echo 'OK: build preflight regression tests passed (29 cases)'
