@@ -48,15 +48,16 @@ func newClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Transport: tr, Timeout: timeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			// via holds the original request plus every hop already followed, so
-			// len(via) is the number of the hop being requested (1-based).
+			// via always holds at least the original request, followed by every hop
+			// already taken, so len(via) numbers the hop being requested (1-based) and
+			// via[len(via)-1] is the previous request.
 			if len(via) > MaxRedirects {
 				return fmt.Errorf("too many redirects")
 			}
 			if req.URL.User != nil {
 				return fmt.Errorf("refusing redirect with embedded credentials")
 			}
-			if len(via) > 0 && strings.EqualFold(via[len(via)-1].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
+			if strings.EqualFold(via[len(via)-1].URL.Scheme, "https") && !strings.EqualFold(req.URL.Scheme, "https") {
 				return fmt.Errorf("refusing HTTPS downgrade")
 			}
 			return nil
