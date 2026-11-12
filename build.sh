@@ -38,8 +38,8 @@ else
   printf 'ERROR: unrecognized Go toolchain version: %s\n' "$go_version" >&2
   exit 1
 fi
-if (( go_major < 1 || (go_major == 1 && (go_minor < 27 || (go_minor == 27 && go_patch < 1))) )); then
-  printf 'ERROR: Go 1.27.1 or newer is required (found %s)\n' "$go_version" >&2
+if (( go_major < 1 || (go_major == 1 && (go_minor < 27 || (go_minor == 27 && go_patch < 4))) )); then
+  printf 'ERROR: Go 1.27.4 or newer is required (found %s)\n' "$go_version" >&2
   exit 1
 fi
 
@@ -233,6 +233,71 @@ if [[ -e "$converter_bin" ]]; then
   done
 fi
 
+# Validate IPv6 literals locally instead of accepting any hexadecimal-looking
+# string and letting curl discover malformed addresses after cleanup.
+ipv6_section_count() {
+  local section="$1"
+  local group
+  local -a groups=()
+  if [[ -z "$section" ]]; then
+    printf '0'
+    return 0
+  fi
+  [[ "$section" != :* && "$section" != *: ]] || return 1
+  IFS=: read -r -a groups <<<"$section"
+  for group in "${groups[@]}"; do
+    [[ "$group" =~ ^[[:xdigit:]]{1,4}$ ]] || return 1
+  done
+  printf '%s' "${#groups[@]}"
+}
+
+valid_ipv4_tail() {
+  local address="$1"
+  local octet value
+  local -a octets=()
+  # Bash's IFS splitting drops a trailing empty field, so validate the full
+  # dotted-quad shape before splitting (e.g. reject "192.0.2.1.").
+  [[ "$address" =~ ^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$ ]] || return 1
+  IFS=. read -r -a octets <<<"$address"
+  ((${#octets[@]} == 4)) || return 1
+  for octet in "${octets[@]}"; do
+    value=$((10#$octet))
+    ((value <= 255)) || return 1
+  done
+}
+
+valid_ipv6_literal() {
+  local address="$1"
+  local remainder left right left_count right_count groups
+  local compressed=0
+  [[ "$address" == *:* && "$address" != *%* ]] || return 1
+  # An IPv4 dotted-decimal tail occupies the final two 16-bit groups.
+  if [[ "$address" == *.* ]]; then
+    valid_ipv4_tail "${address##*:}" || return 1
+    address="${address%:*}:0:0"
+  fi
+  [[ "$address" != *:::* ]] || return 1
+  if [[ "$address" == *::* ]]; then
+    compressed=1
+    remainder="${address#*::}"
+    [[ "$remainder" != *::* ]] || return 1
+    left="${address%%::*}"
+    right="$remainder"
+  else
+    left="$address"
+    right=""
+  fi
+  left_count="$(ipv6_section_count "$left")" || return 1
+  right_count="$(ipv6_section_count "$right")" || return 1
+  groups=$((left_count + right_count))
+  if ((compressed)); then
+    # A single :: must stand for at least one omitted 16-bit group.
+    ((groups < 8))
+  else
+    ((groups == 8))
+  fi
+}
+
 converter_needs_download=0
 if [[ ! -f "$converter_bin" || ! -x "$converter_bin" || ! -s "$converter_bin" ]]; then
   converter_needs_download=1
@@ -253,17 +318,37 @@ if [[ ! -f "$converter_bin" || ! -x "$converter_bin" || ! -s "$converter_bin" ]]
   converter_authority="${CONVERTER_URL#https://}"
   converter_authority="${converter_authority%%[/?#]*}"
   converter_port=""
-  if [[ "$converter_authority" =~ ^\[[[:xdigit:]:.]+\](:[0-9]{1,5})?$ ]]; then
-    if [[ "$converter_authority" =~ :([0-9]{1,5})$ ]]; then
+  converter_host=""
+  if [[ "$converter_authority" =~ ^\[([[:xdigit:]:.]+)\](:[0-9]{1,5})?$ ]]; then
+    converter_host="${BASH_REMATCH[1]}"
+    if [[ "$converter_authority" =~ \]:([0-9]{1,5})$ ]]; then
       converter_port="${BASH_REMATCH[1]}"
     fi
+    valid_ipv6_literal "$converter_host" || {
+      echo "ERROR: CONVERTER_URL must be HTTPS with a valid host and optional port, without credentials" >&2
+      exit 1
+    }
   # Validate hostnames as dot-separated DNS labels (1-63 chars, alphanumeric
-  # with interior hyphens, or a single label such as localhost). A loose
-  # character class would accept malformed names like "a..b" or "-bad" here
-  # and only fail inside curl, after prior output has already been deleted.
+  # with interior hyphens, or a single label such as localhost). Also enforce
+  # the DNS 253-character total limit before curl or cleanup can run.
   elif [[ "$converter_authority" =~ ^([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(:[0-9]{1,5})?$ ]]; then
+    converter_host="$converter_authority"
     if [[ "$converter_authority" =~ :([0-9]{1,5})$ ]]; then
       converter_port="${BASH_REMATCH[1]}"
+      converter_host="${converter_authority%:$converter_port}"
+    fi
+    if ((${#converter_host} > 253)); then
+      echo "ERROR: CONVERTER_URL must be HTTPS with a valid host and optional port, without credentials" >&2
+      exit 1
+    fi
+    # An all-numeric dotted host is parsed as an IPv4 literal by URL clients,
+    # not as an ordinary DNS name. Validate it as a strict dotted quad so an
+    # impossible address cannot pass preflight and fail only after cleanup.
+    if [[ "$converter_host" =~ ^[0-9.]+$ ]]; then
+      valid_ipv4_tail "$converter_host" || {
+        echo "ERROR: CONVERTER_URL must be HTTPS with a valid host and optional port, without credentials" >&2
+        exit 1
+      }
     fi
   else
     echo "ERROR: CONVERTER_URL must be HTTPS with a valid host and optional port, without credentials" >&2
