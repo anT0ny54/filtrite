@@ -226,7 +226,6 @@ func (s *ExternalSorter) mergeRound(chunks []string, fanIn int) ([]string, error
 // removes them.
 func mergeToWriter(chunks []string, w *bufio.Writer, dedupe bool) (rules int, duplicates int, err error) {
 	files := make([]*os.File, len(chunks))
-	readers := make([]*bufio.Reader, len(chunks))
 	defer func() {
 		for _, f := range files {
 			if f != nil {
@@ -242,15 +241,15 @@ func mergeToWriter(chunks []string, w *bufio.Writer, dedupe bool) (rules int, du
 			return 0, 0, fmt.Errorf("open sort chunk %s: %w", path, err)
 		}
 		files[i] = f
-		readers[i] = bufio.NewReaderSize(f, 64<<10)
-		line, err := nextChunkLine(readers[i])
+		reader := bufio.NewReaderSize(f, 64<<10)
+		line, err := nextChunkLine(reader)
 		if err == io.EOF {
 			continue
 		}
 		if err != nil {
 			return 0, 0, fmt.Errorf("read sort chunk %s: %w", path, err)
 		}
-		heap.Push(&h, mergeItem{line: line, reader: readers[i]})
+		heap.Push(&h, mergeItem{line: line, reader: reader})
 	}
 
 	last := ""
@@ -293,11 +292,15 @@ func (s *ExternalSorter) flushChunk() error {
 	s.rules = slices.Compact(s.rules)
 	s.duplicates += n - len(s.rules)
 
-	path := filepath.Join(s.dir, fmt.Sprintf(".chunk-%06d.txt", len(s.chunks)))
-	f, err := os.Create(path)
+	// Use an exclusive, unpredictable name instead of os.Create on a
+	// predictable path. A reused scratch directory may contain stale entries;
+	// following one of those symlinks or truncating a hard link could modify
+	// a file outside the sort workspace.
+	f, err := os.CreateTemp(s.dir, ".chunk-*.txt")
 	if err != nil {
 		return fmt.Errorf("create sort chunk: %w", err)
 	}
+	path := f.Name()
 	w := bufio.NewWriterSize(f, 1<<20)
 	for _, rule := range s.rules {
 		if err := writeLine(w, rule); err != nil {

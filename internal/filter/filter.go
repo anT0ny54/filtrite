@@ -2,6 +2,8 @@ package filter
 
 import (
 	"bufio"
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +15,9 @@ import (
 )
 
 const maxRuleLineBytes = 2 << 20
+
+// utf8BOM is the byte-order mark that may legitimately open a file.
+var utf8BOM = []byte("\uFEFF")
 
 type Stats struct {
 	Read     int
@@ -36,24 +41,46 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (stats Stats, ret
 	}
 	defer in.Close()
 
-	if err := os.MkdirAll(filepath.Dir(rejectedPath), 0o755); err != nil {
+	reportDir := filepath.Dir(rejectedPath)
+	if err := os.MkdirAll(reportDir, 0o755); err != nil {
 		return Stats{}, fmt.Errorf("create rejected report directory: %w", err)
 	}
-	rejFile, err := os.Create(rejectedPath)
+	// Build the report beside its destination and atomically replace the final
+	// path. Opening an existing report with os.Create would truncate every
+	// hard link to the same inode, including files outside the build tree.
+	rejFile, err := os.CreateTemp(reportDir, "."+filepath.Base(rejectedPath)+".tmp-*")
 	if err != nil {
 		return Stats{}, fmt.Errorf("create rejected report: %w", err)
 	}
+	rejTempPath := rejFile.Name()
+	reportCommitted := false
 	rej := bufio.NewWriterSize(rejFile, 64<<10)
 	// Flush and close on every return path. A scan or sink error should not
-	// discard rejected rules buffered before the failure, and close/flush
-	// failures on the success path must be reported to the caller.
+	// discard rejected rules buffered before the failure; commit that partial
+	// report too, while still surfacing any failure to flush, close, chmod, or
+	// atomically replace the destination.
 	defer func() {
-		if err := rej.Flush(); err != nil && returnErr == nil {
-			returnErr = fmt.Errorf("write rejected report: %w", err)
+		var finalizeErr error
+		if err := rej.Flush(); err != nil {
+			finalizeErr = errors.Join(finalizeErr, fmt.Errorf("write rejected report: %w", err))
 		}
-		if err := rejFile.Close(); err != nil && returnErr == nil {
-			returnErr = fmt.Errorf("close rejected report: %w", err)
+		if err := rejFile.Chmod(0o644); err != nil {
+			finalizeErr = errors.Join(finalizeErr, fmt.Errorf("set rejected report permissions: %w", err))
 		}
+		if err := rejFile.Close(); err != nil {
+			finalizeErr = errors.Join(finalizeErr, fmt.Errorf("close rejected report: %w", err))
+		}
+		if finalizeErr == nil {
+			if err := os.Rename(rejTempPath, rejectedPath); err != nil {
+				finalizeErr = fmt.Errorf("replace rejected report: %w", err)
+			} else {
+				reportCommitted = true
+			}
+		}
+		if !reportCommitted {
+			_ = os.Remove(rejTempPath)
+		}
+		returnErr = errors.Join(returnErr, finalizeErr)
 	}()
 
 	if _, err := rej.WriteString("# line\treason\trule\n"); err != nil {
@@ -66,29 +93,33 @@ func ReadFileToSink(input, rejectedPath string, sink RuleSink) (stats Stats, ret
 	// content limit after ScanLines has removed the line ending.
 	sc.Buffer(make([]byte, 64<<10), maxRuleLineBytes+2)
 	for lineNo := 1; sc.Scan(); lineNo++ {
-		if len(sc.Bytes()) > maxRuleLineBytes {
+		// Inspect the scanner's byte buffer directly. Comments and blank lines
+		// make up much of a typical list and are skipped without copying; a
+		// string is allocated only for lines that are actually normalized.
+		raw := sc.Bytes()
+		if len(raw) > maxRuleLineBytes {
 			return stats, fmt.Errorf("scan %s: line exceeds %d bytes", input, maxRuleLineBytes)
 		}
 		stats.Read++
 		// Only a file-start BOM is ignorable. A BOM at the start of any later
 		// rule is an unexpected non-ASCII character and must be rejected.
-		rawLine := sc.Text()
 		if lineNo == 1 {
-			rawLine = strings.TrimPrefix(rawLine, "\uFEFF")
+			raw = bytes.TrimPrefix(raw, utf8BOM)
 		}
-		trimmed := strings.TrimSpace(rawLine)
-		if trimmed == "" || strings.HasPrefix(trimmed, "!") {
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] == '!' {
 			continue
 		}
 
+		rawLine := string(raw)
 		rule, reason, ok := normalize(rawLine)
 		if !ok {
 			stats.Rejected++
 			stats.ByReason[reason]++
 			// Written part by part: a source can have hundreds of thousands of
 			// rejected lines, and building a concatenated string for each one
-			// would allocate needlessly.
-			if err := writeRejectedLine(rej, stats.Read, reason, rawLine); err != nil {
+			// would allocate needlessly. lineNo is the 1-based source line.
+			if err := writeRejectedLine(rej, lineNo, reason, rawLine); err != nil {
 				return stats, fmt.Errorf("write rejected report: %w", err)
 			}
 			continue
@@ -303,7 +334,7 @@ func normalizeNetwork(line string, exception bool) (string, string, bool) {
 // anchoredURLChars is the single source of truth for the printable-ASCII
 // character subset allowed in anchored-URL tails. scripts/validate.sh checks
 // generated output against the identical set; keep both sides in sync.
-const anchoredURLChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~!$&()*+,;=:@%/?#-"
+const anchoredURLChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._~!&()*+,;=:@%/?#-"
 
 var anchoredURLCharSet = func() [utf8.RuneSelf]bool {
 	var set [utf8.RuneSelf]bool

@@ -720,3 +720,15 @@ func TestSanitizeReportRemovesControlBytesAndRepairsInvalidUTF8(t *testing.T) {
 		t.Fatalf("sanitizeReport() retained bidi/zero-width formatting in %q", got)
 	}
 }
+
+func TestFullyAnchoredURLRequiresEncodingLiteralDollar(t *testing.T) {
+	if got, reason, ok := normalize("|https://example.com/price$sale.js|"); ok {
+		t.Fatalf("normalize accepted raw dollar in URL tail as %q", got)
+	} else if reason != "unsupported-modifier" {
+		t.Fatalf("raw-dollar rejection reason=%q, want unsupported-modifier", reason)
+	}
+	const encoded = "|https://example.com/price%24sale.js|"
+	if got, reason, ok := normalize(encoded); !ok || got != encoded || reason != "" {
+		t.Fatalf("normalize(%q) = %q, %q, %v; want unchanged accepted rule", encoded, got, reason, ok)
+	}
+}

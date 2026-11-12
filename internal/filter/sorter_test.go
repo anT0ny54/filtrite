@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -119,6 +120,102 @@ func TestExternalSorterFlushesOversizedSingleRuleImmediatelyAndReleasesIt(t *tes
 	for i, rule := range sorter.rules[:cap(sorter.rules)] {
 		if rule != "" {
 			t.Fatalf("sorter retained flushed rule reference at slot %d", i)
+		}
+	}
+}
+
+func TestExternalSorterDoesNotFollowPreexistingChunkLinks(t *testing.T) {
+	for _, linkType := range []string{"symlink", "hardlink"} {
+		t.Run(linkType, func(t *testing.T) {
+			dir := t.TempDir()
+			sortDir := filepath.Join(dir, "sort")
+			if err := os.Mkdir(sortDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			target := filepath.Join(dir, "outside.txt")
+			const sentinel = "preserve external data\n"
+			if err := os.WriteFile(target, []byte(sentinel), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			staleChunk := filepath.Join(sortDir, ".chunk-000000.txt")
+			switch linkType {
+			case "symlink":
+				if err := os.Symlink(target, staleChunk); err != nil {
+					t.Skipf("symlinks unavailable: %v", err)
+				}
+			case "hardlink":
+				if err := os.Link(target, staleChunk); err != nil {
+					t.Skipf("hard links unavailable: %v", err)
+				}
+			}
+
+			sorter, err := NewExternalSorter(sortDir, 8)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sorter.Add("||safe.example/path"); err != nil {
+				t.Fatal(err)
+			}
+			output := filepath.Join(dir, "filters.txt")
+			if _, err := sorter.Finish(output); err != nil {
+				t.Fatal(err)
+			}
+
+			if got, err := os.ReadFile(target); err != nil || string(got) != sentinel {
+				t.Fatalf("external chunk target changed: got=%q err=%v", got, err)
+			}
+			if _, err := os.Lstat(staleChunk); err != nil {
+				t.Fatalf("pre-existing scratch entry was unexpectedly removed: %v", err)
+			}
+			got, err := os.ReadFile(output)
+			if err != nil || string(got) != "||safe.example/path\n" {
+				t.Fatalf("output=%q err=%v, want normalized sorted rule", got, err)
+			}
+		})
+	}
+}
+
+func TestExternalSorterMergesBeyondFanInAndDeduplicatesAcrossGroups(t *testing.T) {
+	dir := t.TempDir()
+	output := filepath.Join(dir, "filters.txt")
+	sorter, err := NewExternalSorter(filepath.Join(dir, "sort"), 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for i := 0; i < maxMergeFanIn+1; i++ {
+		var rule string
+		switch i {
+		case 0:
+			rule = "||duplicate.example^$third-party"
+		case maxMergeFanIn:
+			rule = "||duplicate.example^"
+		default:
+			rule = "||rule-" + fmt.Sprintf("%03d", i) + ".example/path"
+		}
+		if err := sorter.Add(rule); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := sorter.Finish(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Rules != maxMergeFanIn || result.Duplicates != 1 {
+		t.Fatalf("result=%+v, want %d rules and 1 duplicate across merge groups", result, maxMergeFanIn)
+	}
+	got, err := os.ReadFile(output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(got), "\n"), "\n")
+	if len(lines) != maxMergeFanIn {
+		t.Fatalf("output has %d lines, want %d", len(lines), maxMergeFanIn)
+	}
+	for i := 1; i < len(lines); i++ {
+		if lines[i-1] > lines[i] {
+			t.Fatalf("output is not sorted at line %d: %q > %q", i+1, lines[i-1], lines[i])
 		}
 	}
 }
