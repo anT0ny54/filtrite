@@ -259,7 +259,6 @@ valid_ipv4_tail() {
   # dotted-quad shape before splitting (e.g. reject "192.0.2.1.").
   [[ "$address" =~ ^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$ ]] || return 1
   IFS=. read -r -a octets <<<"$address"
-  ((${#octets[@]} == 4)) || return 1
   for octet in "${octets[@]}"; do
     value=$((10#$octet))
     ((value <= 255)) || return 1
@@ -315,6 +314,14 @@ if [[ ! -f "$converter_bin" || ! -x "$converter_bin" || ! -s "$converter_bin" ]]
     echo "ERROR: CONVERTER_URL must be a non-empty HTTPS URL" >&2
     exit 1
   }
+  # A '%' in any URL component must start a complete hexadecimal escape.
+  # Scan once so URLs with many escapes do not repeatedly copy their suffix.
+  # Reject malformed escapes before cleanup instead of letting curl discover
+  # them only after the previous generated artifacts have been removed.
+  if [[ "$CONVERTER_URL" =~ %([^[:xdigit:]]|$)|%[[:xdigit:]]([^[:xdigit:]]|$) ]]; then
+    echo "ERROR: CONVERTER_URL contains a malformed percent escape" >&2
+    exit 1
+  fi
   converter_authority="${CONVERTER_URL#https://}"
   converter_authority="${converter_authority%%[/?#]*}"
   converter_port=""

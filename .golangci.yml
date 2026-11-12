@@ -20,4 +20,4 @@ linters:
 formatters:
   enable:
     - gofmt
-    
+

@@ -90,7 +90,7 @@ Each manifest is otherwise identical in format to `lists/adblock.txt`: one HTTPS
 
 Requirements:
 
-- Stable Go 1.27.4+ for this source tree; `build.sh` validates the complete installed `goX.Y.Z` version before cleanup and does not rely on an automatic toolchain download succeeding mid-build.
+- Stable Go 1.27.4+ installed locally for this source tree. Before cleanup, `build.sh` checks the installed version with `GOTOOLCHAIN=local go env GOVERSION`, so an automatic toolchain download cannot substitute for the required local toolchain.
 - Bash 4+, `awk`, and GNU coreutils (`realpath`, `stat`, plus standard file utilities used by the script).
 - `mktemp`, `curl`, and `unzip` only when the cached `deps/ruleset_converter` is missing or needs to be refreshed.
 - `sha256sum` only when `CONVERTER_SHA256` is set.
@@ -144,7 +144,7 @@ For direct builder use, partial source failures are disabled by default. Use `--
 https://github.com/xarantolus/subresource_filter_tools/releases/latest/download/subresource_filter_tools_linux-x64.zip
 ```
 
-Override the location with `CONVERTER_URL=<https url>` — the host is validated before cleanup as a DNS name (dot-separated labels of 1–63 alphanumeric characters with optional interior hyphens and a 253-character total limit, or a single label such as `localhost`), a strict dotted-quad IPv4 literal when the host is entirely numeric (exactly four decimal octets, each 0–255, with no leading zeros or trailing dot), or a bracketed IPv6 literal (including an optional final strict IPv4 dotted-quad tail, with at most one `::` compression and valid group/octet counts); an optional port must be 1–65535. A malformed URL therefore fails before any prior output is deleted. Pin the archive with `CONVERTER_SHA256=<hex>`; when set, a checksum mismatch aborts the build. Without a pin, each fresh download uses whatever is currently published, so reproducible builds require preserving a known converter binary separately.
+Override the location with `CONVERTER_URL=<https url>` — before cleanup, the preflight checks the HTTPS scheme, rejects whitespace and any percent sign not followed by two ASCII hexadecimal digits (valid percent escapes are preserved), and validates the authority as a DNS name (dot-separated labels of 1–63 alphanumeric characters with optional interior hyphens and a 253-character total limit, or a single label such as `localhost`), a strict dotted-quad IPv4 literal when the host is entirely numeric (exactly four decimal octets, each 0–255, with no leading zeros or trailing dot), or a bracketed IPv6 literal (including an optional final strict IPv4 dotted-quad tail, with at most one `::` compression and valid group/octet counts); an optional port must be 1–65535. These malformed scheme, authority, host, port, whitespace, or percent-escape configurations fail before prior output is deleted; the preflight does not perform a network request or validate whether the remote path exists. Pin the archive with `CONVERTER_SHA256=<hex>`; when set, a checksum mismatch aborts the build. Without a pin, each fresh download uses whatever is currently published, so reproducible builds require preserving a known converter binary separately.
 
 `filtrite` itself fails on a missing or empty converter output, so `build.sh` does not re-check for an empty file. `build.sh` checks every generated `dist/<name>.dat` against a **20 MiB default release limit** and fails the build when it is exceeded: the oversized artifact is deleted and the script exits with a nonzero status, so an over-limit ruleset can never be published. Override the ceiling with `MAX_RULESET_BYTES=<bytes>` when intentionally shipping a larger ruleset.
 
@@ -170,9 +170,9 @@ The shell validator is deliberately a line-local sanity check rather than a seco
 ./scripts/validate_test.sh
 ```
 
-This feeds known-good and known-malformed generated rules through `validate.sh`. When `deps/ruleset_converter` exists (after `./build.sh`), every rule the validator accepts is also run through the real converter, so the validator cannot drift into accepting rules Chromium rejects. The CI workflow runs it after the build.
+This feeds known-good and known-malformed generated rules through `validate.sh`. When `deps/ruleset_converter` exists (after `./build.sh`), each known-good fixture rule is also run through the real converter, which catches a fixture the validator accepts but Chromium rejects. Malformed fixtures are not sent to the converter. The validator is only a line-local sanity check, so it is not a full emulation of Chromium; the complete generated list is converted by `build.sh` itself, and a list Chromium rejects fails the build. The CI workflow runs this test after the build.
 
-`scripts/build_preflight_test.sh` covers the path-safety preflight that `build.sh` runs before it deletes any previous output: symlink, hard-link, and alias rejection, plus converter URL (including IPv6 structure and DNS length), checksum, size-limit, and Go-version validation. It uses a fake `go` binary, so it needs neither network access nor a Go 1.27.4 toolchain:
+`scripts/build_preflight_test.sh` covers the path-safety preflight that `build.sh` runs before it deletes any previous output: symlink, hard-link, and alias rejection, plus converter URL authority checks (including IPv6 structure and DNS length), percent-escape validation (malformed or incomplete escapes are rejected while valid escapes pass), checksum, size-limit, and Go-version validation. It uses a fake `go` binary, so it needs neither network access nor a Go 1.27.4 toolchain. The script reports its fixture count dynamically:
 
 ```sh
 ./scripts/build_preflight_test.sh
