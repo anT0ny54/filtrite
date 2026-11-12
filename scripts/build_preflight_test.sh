@@ -18,8 +18,11 @@ exit 90
 GO
 chmod +x "$fakebin/go"
 
+case_count=0
+
 new_fixture() {
   local name="$1"
+  case_count=$((case_count + 1))
   repo="$work/$name"
   mkdir -p "$repo/lists" "$repo/filters" "$repo/dist" "$repo/build/work" "$repo/build/source-cache"
   cp "$root/build.sh" "$repo/build.sh"
@@ -162,6 +165,28 @@ new_fixture converter-url-invalid-port
 run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env CONVERTER_URL=https://example.com:65536/download.zip
 assert_generated_sentinels_preserved
 
+# Malformed percent escapes anywhere in the URL must fail before cleanup.
+new_fixture converter-url-malformed-percent-escape
+run_expect_failure 'CONVERTER_URL contains a malformed percent escape' env CONVERTER_URL=https://example.com/%zz
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-incomplete-percent-escape
+run_expect_failure 'CONVERTER_URL contains a malformed percent escape' env CONVERTER_URL=https://example.com/download%
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-one-digit-percent-escape
+run_expect_failure 'CONVERTER_URL contains a malformed percent escape' env CONVERTER_URL=https://example.com/%A
+assert_generated_sentinels_preserved
+
+new_fixture converter-url-non-hex-percent-escape
+run_expect_failure 'CONVERTER_URL contains a malformed percent escape' env CONVERTER_URL=https://example.com/%0G
+assert_generated_sentinels_preserved
+
+# Correctly encoded path bytes are valid and must reach later URL checks.
+new_fixture converter-url-valid-percent-escape
+run_expect_failure 'CONVERTER_URL port must be between 1 and 65535' env CONVERTER_URL=https://example.com:65536/a%2Fb.zip
+assert_generated_sentinels_preserved
+
 # Malformed DNS names (empty labels, labels with bad boundaries) must fail
 # preflight, before cleanup, instead of surfacing later inside curl.
 new_fixture converter-url-malformed-host
@@ -243,4 +268,4 @@ new_fixture old-go-patch
 FAKE_GO_VERSION=go1.27.3 run_expect_failure 'Go 1.27.4 or newer is required'
 assert_generated_sentinels_preserved
 
-echo 'OK: build preflight regression tests passed (29 cases)'
+printf 'OK: build preflight regression tests passed (%d cases)\n' "$case_count"

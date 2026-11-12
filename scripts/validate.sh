@@ -18,6 +18,14 @@ function valid_domain(host,    n, labels, i, label, all_numeric) {
   }
   return !all_numeric
 }
+
+function host_error(host) {
+  if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./)return "bad host"
+  if(host~/^[0-9.]+$/)return "ip literal host"
+  if(host~/[A-Z]/)return "non-canonical (upper-case) host"
+  if(!valid_domain(host))return "bad hostname label or length"
+  return ""
+}
 BEGIN{bad=0}
 {
   sub(/\r$/,"")
@@ -111,12 +119,8 @@ BEGIN{bad=0}
     sub(/^https?:\/\//,"",authority)
     host=authority
     sub(/[\/?#].*$/,"",host)
-    if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){
-      print "bad host: " NR;bad=1;next
-    }
-    if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1;next}
-    if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1;next}
-    if(!valid_domain(host)){print "bad hostname label or length: " NR;bad=1;next}
+    herr=host_error(host)
+    if(herr!=""){print herr ": " NR;bad=1;next}
     next
   }
 
@@ -141,10 +145,8 @@ BEGIN{bad=0}
      && line ~ /^\|\|[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+\^$/ \
      && line !~ /^\|\|[0-9.]+\^$/){print "missing third-party guard: " NR;bad=1}
 
-  if(host!~/^[A-Za-z0-9.-]+$/||host!~/\./||host~/^\.|\.$|\.\./){print "bad host: " NR;bad=1}
-  else if(host~/^[0-9.]+$/){print "ip literal host: " NR;bad=1}
-  else if(host~/[A-Z]/){print "non-canonical (upper-case) host: " NR;bad=1}
-  else if(!valid_domain(host)){print "bad hostname label or length: " NR;bad=1}
+  herr=host_error(host)
+  if(herr!=""){print herr ": " NR;bad=1}
 }
 END{exit bad}
 ' "$file"

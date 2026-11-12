@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Regression tests for scripts/validate.sh: the validator must accept every
 # rule shape the Go normalizer emits and reject known-malformed output. When
-# a real ruleset_converter is available (after ./build.sh), every
-# validator-accepted rule is additionally run through Chromium's parser so
-# the two stages cannot drift apart. See README.md "Validation".
+# a real ruleset_converter is available (after ./build.sh), each known-good
+# fixture rule is additionally run through Chromium's parser. Rules the
+# validator rejects are not sent to the converter; the full generated list is
+# converted by build.sh itself. See README.md "Validation".
 set -Eeuo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
