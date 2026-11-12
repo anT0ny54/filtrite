@@ -2,6 +2,7 @@ package download
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -18,6 +19,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode"
 )
 
 const (
@@ -409,10 +411,10 @@ func getOnce(ctx context.Context, c *http.Client, rawURL, dir string, budget *by
 	}()
 	reader := &budgetReader{r: io.LimitReader(resp.Body, MaxSourceBytes+1), budget: budget}
 	n, err := io.Copy(tmp, reader)
-	// The shared budget accounts for bytes that end up in published
-	// artifacts; anything discarded below is refunded so a failed or
-	// rejected download cannot silently consume the build's budget.
-	refund := func() { budget.refund(n) }
+	// Refund every byte read from the response when this attempt is discarded.
+	// io.Copy's returned count is bytes written, which can be smaller than the
+	// bytes already read when the destination reports a short write/error.
+	refund := func() { budget.refund(reader.bytesRead) }
 	if err != nil {
 		refund()
 		return "", 0, err
@@ -508,9 +510,28 @@ func (b *byteBudget) settle(want, n int64) {
 	b.mu.Unlock()
 }
 
+const maxConsecutiveEmptyReads = 100
+
 type budgetReader struct {
-	r      io.Reader
-	budget *byteBudget
+	r            io.Reader
+	budget       *byteBudget
+	stalledReads int
+	bytesRead    int64
+}
+
+// noteReadProgress bounds consecutive (0, nil) results. A Reader that never
+// makes progress can otherwise keep io.Copy in a tight loop indefinitely,
+// even while budget remains available.
+func (r *budgetReader) noteReadProgress(n int, err error) error {
+	if n > 0 || err != nil {
+		r.stalledReads = 0
+		return err
+	}
+	r.stalledReads++
+	if r.stalledReads >= maxConsecutiveEmptyReads {
+		return fmt.Errorf("download stalled: %w", io.ErrNoProgress)
+	}
+	return nil
 }
 
 func (r *budgetReader) Read(p []byte) (int, error) {
@@ -526,24 +547,33 @@ func (r *budgetReader) Read(p []byte) (int, error) {
 		// returning (0, nil) without progress is treated as stalled instead of
 		// spinning forever.
 		var probe [1]byte
-		for stalled := 0; ; stalled++ {
+		for {
 			n, err := r.r.Read(probe[:])
 			if n > 0 {
+				r.stalledReads = 0
 				return 0, ErrTooLarge
 			}
 			if err != nil {
+				r.stalledReads = 0
 				return 0, err
 			}
-			if stalled >= 100 {
-				return 0, fmt.Errorf("download stalled: reader returned no data without error")
+			if err := r.noteReadProgress(n, err); err != nil {
+				return 0, err
 			}
 		}
 	}
 
 	n, err := r.r.Read(p[:want])
 	r.budget.settle(want, int64(n))
+	r.bytesRead += int64(n)
+	if progressErr := r.noteReadProgress(n, err); progressErr != nil {
+		return n, progressErr
+	}
 	return n, err
 }
+
+// htmlErrorPrefixes are the lower-case tags that mark an HTML error page.
+var htmlErrorPrefixes = [...][]byte{[]byte("<!doctype html"), []byte("<html"), []byte("<head"), []byte("<body")}
 
 func htmlError(path string) bool {
 	f, err := os.Open(path)
@@ -551,10 +581,54 @@ func htmlError(path string) bool {
 		return false
 	}
 	defer f.Close()
-	buf := make([]byte, 4096)
-	n, _ := io.ReadFull(f, buf) // short files return ErrUnexpectedEOF with n valid
-	s := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(string(buf[:n])), "\ufeff"))
-	return strings.HasPrefix(s, "<!doctype html") || strings.HasPrefix(s, "<html") || strings.HasPrefix(s, "<head") || strings.HasPrefix(s, "<body")
+
+	// Skip a file-start BOM and leading Unicode whitespace incrementally.
+	// Unlike a fixed-size prefix buffer, this still detects an HTML error
+	// page padded with more than 4 KiB of whitespace, without reading or
+	// allocating the rest of a potentially large filter list.
+	reader := bufio.NewReaderSize(f, 4096)
+	firstRune := true
+	var first byte
+	for {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			return false
+		}
+		if firstRune && r == '\uFEFF' {
+			firstRune = false
+			continue
+		}
+		firstRune = false
+		if unicode.IsSpace(r) {
+			continue
+		}
+		if r > unicode.MaxASCII {
+			return false
+		}
+		first = byte(r)
+		break
+	}
+
+	var prefix [len("<!doctype html")]byte
+	prefix[0] = first
+	n := 1
+	for n < len(prefix) {
+		r, _, err := reader.ReadRune()
+		if err != nil {
+			break
+		}
+		if r > unicode.MaxASCII {
+			break
+		}
+		prefix[n] = byte(r)
+		n++
+	}
+	for _, tag := range htmlErrorPrefixes {
+		if n >= len(tag) && bytes.EqualFold(prefix[:len(tag)], tag) {
+			return true
+		}
+	}
+	return false
 }
 
 // drainBody discards a bounded prefix of resp.Body so the underlying

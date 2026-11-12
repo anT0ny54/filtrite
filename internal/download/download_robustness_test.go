@@ -327,19 +327,101 @@ func TestBudgetReaderInterruptedReadKeepsAccurateAccounting(t *testing.T) {
 	}
 }
 
-func TestBudgetReaderZeroByteReadsDoNotConsumeBudget(t *testing.T) {
+func TestBudgetReaderStopsRepeatedZeroByteReadsWithoutConsumingBudget(t *testing.T) {
 	budget := newByteBudget(10)
 	zr := &zeroReader{}
 	r := &budgetReader{r: zr, budget: budget}
 	buf := make([]byte, 8)
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < maxConsecutiveEmptyReads-1; i++ {
 		n, err := r.Read(buf)
 		if n != 0 || err != nil {
-			t.Fatalf("read %d: n=%d err=%v, want 0,nil", i, n, err)
+			t.Fatalf("read %d: n=%d err=%v, want 0,nil before stall limit", i, n, err)
 		}
+	}
+	n, err := r.Read(buf)
+	if n != 0 || !errors.Is(err, io.ErrNoProgress) || !strings.Contains(err.Error(), "download stalled") {
+		t.Fatalf("terminal read: n=%d err=%v, want bounded stalled-reader error", n, err)
+	}
+	if zr.calls != maxConsecutiveEmptyReads {
+		t.Fatalf("reader calls=%d, want %d", zr.calls, maxConsecutiveEmptyReads)
 	}
 	if got := budget.remainingBytes(); got != 10 {
 		t.Fatalf("budget=%d after zero-byte reads, want 10", got)
+	}
+}
+
+type shortErrorWriter struct{}
+
+func (shortErrorWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	return 1, errors.New("simulated destination write failure")
+}
+
+func TestFailedCopyRefundsAllBytesReadAfterShortWrite(t *testing.T) {
+	budget := newByteBudget(10)
+	reader := &budgetReader{r: strings.NewReader("0123456789"), budget: budget}
+	written, err := io.Copy(shortErrorWriter{}, reader)
+	if err == nil {
+		t.Fatal("io.Copy unexpectedly succeeded with a failing destination")
+	}
+	if written != 1 {
+		t.Fatalf("io.Copy wrote %d bytes, want the writer's one-byte partial write", written)
+	}
+	if reader.bytesRead != 10 {
+		t.Fatalf("reader consumed %d bytes, want all 10 bytes returned by Read", reader.bytesRead)
+	}
+	if got := budget.remainingBytes(); got != 0 {
+		t.Fatalf("budget before refund=%d, want 0 after reserving all bytes", got)
+	}
+
+	// getOnce refunds bytesRead, not io.Copy's smaller written count, because
+	// the temporary file is discarded after a destination write failure.
+	budget.refund(reader.bytesRead)
+	if got := budget.remainingBytes(); got != 10 {
+		t.Fatalf("budget after failed-copy refund=%d, want full 10-byte budget", got)
+	}
+}
+
+func TestBudgetReaderProgressResetsStallCounter(t *testing.T) {
+	budget := newByteBudget(10)
+	readerCalls := 0
+	reader := readerFunc(func(p []byte) (int, error) {
+		if readerCalls < maxConsecutiveEmptyReads-1 {
+			readerCalls++
+			return 0, nil
+		}
+		if readerCalls == maxConsecutiveEmptyReads-1 {
+			readerCalls++
+			p[0] = 'x'
+			return 1, nil
+		}
+		readerCalls++
+		return 0, nil
+	})
+	r := &budgetReader{r: reader, budget: budget}
+	buf := make([]byte, 8)
+	for i := 0; i < maxConsecutiveEmptyReads-1; i++ {
+		n, err := r.Read(buf)
+		if n != 0 || err != nil {
+			t.Fatalf("pre-progress read %d: n=%d err=%v", i, n, err)
+		}
+	}
+	if n, err := r.Read(buf); n != 1 || err != nil || buf[0] != 'x' {
+		t.Fatalf("progress read: n=%d err=%v data=%q, want one byte", n, err, buf[:1])
+	}
+	for i := 0; i < maxConsecutiveEmptyReads-1; i++ {
+		n, err := r.Read(buf)
+		if n != 0 || err != nil {
+			t.Fatalf("post-progress read %d: n=%d err=%v", i, n, err)
+		}
+	}
+	if n, err := r.Read(buf); n != 0 || !errors.Is(err, io.ErrNoProgress) {
+		t.Fatalf("terminal read after progress: n=%d err=%v, want stalled error", n, err)
+	}
+	if got := budget.remainingBytes(); got != 9 {
+		t.Fatalf("budget=%d, want 9 after the one delivered byte", got)
 	}
 }
 
