@@ -560,6 +560,7 @@ func TestHostsEntriesRejectTrailingFields(t *testing.T) {
 		t.Fatalf("rules=%v reasons=%v", rules, st.ByReason)
 	}
 }
+
 func TestReadFileToSinkStreamsRules(t *testing.T) {
 	dir := t.TempDir()
 	in := filepath.Join(dir, "in.txt")

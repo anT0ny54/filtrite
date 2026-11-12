@@ -220,7 +220,9 @@ func normalize(line string) (string, string, bool) {
 			// prefix was already confirmed by HasPrefix above and is pure
 			// ASCII, so slice instead of re-scanning with TrimPrefix.
 			host := line[len(prefix):]
-			if host != "" && !strings.ContainsAny(host, " \t") && validDomain(host) {
+			// validDomain rejects the empty string and every byte outside [A-Za-z0-9.-],
+			// so it already rejects the spaces and tabs an extra field would introduce.
+			if validDomain(host) {
 				return "||" + strings.ToLower(host) + "^", "", true
 			}
 			return "", "invalid-host-entry", false

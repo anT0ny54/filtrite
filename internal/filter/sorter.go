@@ -253,12 +253,11 @@ func mergeToWriter(chunks []string, w *bufio.Writer, dedupe bool) (rules int, du
 	}
 
 	last := ""
-	haveLast := false
 	for h.Len() > 0 {
 		// Work on the heap root in place: replacing it and calling heap.Fix
 		// costs one sift-down instead of a Pop plus a Push per line.
 		line := h[0].line
-		if dedupe && haveLast && line == last {
+		if dedupe && rules > 0 && line == last {
 			duplicates++
 		} else {
 			if err := writeLine(w, line); err != nil {
@@ -266,7 +265,6 @@ func mergeToWriter(chunks []string, w *bufio.Writer, dedupe bool) (rules int, du
 			}
 			rules++
 			last = line
-			haveLast = true
 		}
 
 		next, err := nextChunkLine(h[0].reader)
