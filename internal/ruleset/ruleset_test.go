@@ -223,3 +223,211 @@ func TestConvertCanceledContextLeavesLogAndOutputUntouched(t *testing.T) {
 		t.Fatalf("log changed for canceled conversion: got=%q err=%v", got, readErr)
 	}
 }
+
+func TestConvertDoesNotTruncateExternalHardLinkToLog(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	output := filepath.Join(root, "output.dat")
+	logPath := filepath.Join(root, "converter.log")
+	external := filepath.Join(root, "external.txt")
+	converter := filepath.Join(root, "converter.sh")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "preserve external data\n"
+	if err := os.WriteFile(external, []byte(sentinel), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\necho converter output\nfor arg in \"$@\"; do case \"$arg\" in --output_file=*) printf 'ruleset' > \"${arg#--output_file=}\";; esac; done\n"
+	if err := os.WriteFile(converter, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Link(external, logPath); err != nil {
+		t.Skipf("hard links unavailable: %v", err)
+	}
+
+	if err := Convert(context.Background(), Options{Converter: converter, Input: input, Output: output, Log: logPath}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(external); err != nil || string(got) != sentinel {
+		t.Fatalf("external hard-link target changed: got=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(logPath); err != nil || !strings.Contains(string(got), "converter output") {
+		t.Fatalf("converter log missing captured output: got=%q err=%v", got, err)
+	}
+	if got, err := os.ReadFile(output); err != nil || string(got) != "ruleset" {
+		t.Fatalf("converter output=%q err=%v, want ruleset", got, err)
+	}
+}
+
+func TestConvertRejectsNonRegularLogPath(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	logDir := filepath.Join(root, "log-directory")
+	if err := os.Mkdir(logDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: filepath.Join(root, "out.dat"), Log: logDir})
+	if err == nil || !strings.Contains(err.Error(), "log path must be a regular file") {
+		t.Fatalf("Convert error=%v, want non-regular log-path rejection", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "out.dat")); !os.IsNotExist(err) {
+		t.Fatalf("output was created despite log-path rejection: stat=%v", err)
+	}
+}
+
+func TestConvertRejectsSymlinkedOrNonRegularOutputBeforeCreatingTemps(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("symlink", func(t *testing.T) {
+		target := filepath.Join(root, "outside.dat")
+		const sentinel = "preserve external output\n"
+		if err := os.WriteFile(target, []byte(sentinel), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		output := filepath.Join(root, "output.dat")
+		if err := os.Symlink(target, output); err != nil {
+			t.Skipf("symlinks unavailable: %v", err)
+		}
+		err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: output})
+		if err == nil || !strings.Contains(err.Error(), "output path must not be a symlink") {
+			t.Fatalf("Convert error=%v, want output-symlink rejection", err)
+		}
+		if got, readErr := os.ReadFile(target); readErr != nil || string(got) != sentinel {
+			t.Fatalf("symlink target changed: got=%q err=%v", got, readErr)
+		}
+		if info, lstatErr := os.Lstat(output); lstatErr != nil || info.Mode()&os.ModeSymlink == 0 {
+			t.Fatalf("output symlink was changed: info=%v err=%v", info, lstatErr)
+		}
+		entries, readErr := os.ReadDir(root)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		for _, entry := range entries {
+			if strings.Contains(entry.Name(), ".tmp-") {
+				t.Fatalf("temporary file %q created before output preflight failed", entry.Name())
+			}
+		}
+	})
+
+	t.Run("directory", func(t *testing.T) {
+		output := filepath.Join(root, "output-directory")
+		if err := os.Mkdir(output, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		err := Convert(context.Background(), Options{Converter: "/bin/true", Input: input, Output: output})
+		if err == nil || !strings.Contains(err.Error(), "output path must be a regular file") {
+			t.Fatalf("Convert error=%v, want non-regular output rejection", err)
+		}
+		entries, readErr := os.ReadDir(output)
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if len(entries) != 0 {
+			t.Fatalf("output directory was modified during failed preflight: %v", entries)
+		}
+	})
+}
+
+func TestConvertRejectsConverterReplacingTemporaryOutputWithSymlink(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	output := filepath.Join(root, "output.dat")
+	target := filepath.Join(root, "target.dat")
+	converter := filepath.Join(root, "converter.sh")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "preserve converter target\n"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// Replace the wrapper-created temporary output with a symlink to an
+	// unrelated file. The wrapper must reject it before Chmod or publication.
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    --output_file=*)\n" +
+		"      temp=\"${arg#--output_file=}\"\n" +
+		"      rm -f \"$temp\"\n" +
+		"      ln -s \"$(dirname \"$temp\")/target.dat\" \"$temp\"\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n"
+	if err := os.WriteFile(converter, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(converter, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Convert(context.Background(), Options{Converter: converter, Input: input, Output: output})
+	if err == nil || !strings.Contains(err.Error(), "converter output is not a regular file") {
+		t.Fatalf("Convert error=%v, want replaced-temporary-output rejection", err)
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != sentinel {
+		t.Fatalf("converter target content changed: got=%q err=%v", got, readErr)
+	}
+	if info, statErr := os.Stat(target); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("converter target permissions=%#o, want %#o", info.Mode().Perm(), 0o600)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("final output was published from a symlinked temporary path: stat=%v", statErr)
+	}
+}
+
+func TestConvertRejectsConverterReplacingTemporaryOutputWithHardLink(t *testing.T) {
+	root := t.TempDir()
+	input := filepath.Join(root, "input.txt")
+	output := filepath.Join(root, "output.dat")
+	target := filepath.Join(root, "target.dat")
+	converter := filepath.Join(root, "converter.sh")
+	if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	const sentinel = "preserve hard-link target\n"
+	if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := "#!/bin/sh\n" +
+		"for arg in \"$@\"; do\n" +
+		"  case \"$arg\" in\n" +
+		"    --output_file=*)\n" +
+		"      temp=\"${arg#--output_file=}\"\n" +
+		"      rm -f \"$temp\"\n" +
+		"      ln \"$(dirname \"$temp\")/target.dat\" \"$temp\"\n" +
+		"      ;;\n" +
+		"  esac\n" +
+		"done\n"
+	if err := os.WriteFile(converter, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(converter, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	err := Convert(context.Background(), Options{Converter: converter, Input: input, Output: output})
+	if err == nil || !strings.Contains(err.Error(), "converter replaced its temporary output file") {
+		t.Fatalf("Convert error=%v, want replaced-temporary-output hard-link rejection", err)
+	}
+	if got, readErr := os.ReadFile(target); readErr != nil || string(got) != sentinel {
+		t.Fatalf("converter hard-link target content changed: got=%q err=%v", got, readErr)
+	}
+	if info, statErr := os.Stat(target); statErr != nil {
+		t.Fatal(statErr)
+	} else if info.Mode().Perm() != 0o600 {
+		t.Fatalf("converter hard-link target permissions=%#o, want %#o", info.Mode().Perm(), 0o600)
+	}
+	if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+		t.Fatalf("final output was published from a replaced temporary path: stat=%v", statErr)
+	}
+}

@@ -2,6 +2,7 @@ package ruleset
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -103,11 +104,25 @@ func Convert(ctx context.Context, o Options) error {
 	if err := rejectAliasedPaths(o.Input, o.Output, converterPath, o.Log); err != nil {
 		return err
 	}
+	// The output is atomically replaced after conversion. Reject leaf symlinks
+	// rather than silently replacing a link whose target may be outside the
+	// build tree, and reject other non-regular objects before creating temps.
+	outputInfo, err := os.Lstat(o.Output)
+	switch {
+	case err == nil && outputInfo.Mode()&os.ModeSymlink != 0:
+		return fmt.Errorf("output path must not be a symlink: %s", o.Output)
+	case err == nil && !outputInfo.Mode().IsRegular():
+		return fmt.Errorf("output path must be a regular file: %s", o.Output)
+	case err != nil && !os.IsNotExist(err):
+		return fmt.Errorf("inspect output path: %w", err)
+	}
 	if o.Log != "" {
 		info, err := os.Lstat(o.Log)
 		switch {
 		case err == nil && info.Mode()&os.ModeSymlink != 0:
 			return fmt.Errorf("log path must not be a symlink: %s", o.Log)
+		case err == nil && !info.Mode().IsRegular():
+			return fmt.Errorf("log path must be a regular file: %s", o.Log)
 		case err != nil && !os.IsNotExist(err):
 			return fmt.Errorf("stat log path: %w", err)
 		}
@@ -121,6 +136,12 @@ func Convert(ctx context.Context, o Options) error {
 		return err
 	}
 	tmpPath := tmp.Name()
+	tmpInfo, err := tmp.Stat()
+	if err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("inspect temporary output: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		_ = os.Remove(tmpPath)
 		return fmt.Errorf("close temporary output: %w", err)
@@ -129,37 +150,72 @@ func Convert(ctx context.Context, o Options) error {
 	args := []string{"--input_format=filter-list", "--output_format=unindexed-ruleset", "--input_files=" + o.Input, "--output_file=" + tmpPath}
 	cmd := exec.CommandContext(ctx, converterPath, args...)
 	var logf *os.File
+	var logTempPath string
 	if o.Log != "" {
 		if err := os.MkdirAll(filepath.Dir(o.Log), 0o755); err != nil {
 			return fmt.Errorf("create log directory: %w", err)
 		}
-		logf, err = os.Create(o.Log)
+		// Write the log to a same-directory temporary file and replace the
+		// requested path only after the process exits. os.Create(o.Log) would
+		// truncate any unrelated file hard-linked to an existing log path.
+		logf, err = os.CreateTemp(filepath.Dir(o.Log), "."+filepath.Base(o.Log)+".tmp-*")
 		if err != nil {
 			return fmt.Errorf("create converter log: %w", err)
 		}
+		logTempPath = logf.Name()
+		defer os.Remove(logTempPath)
 		cmd.Stdout = logf
 		cmd.Stderr = logf
 	}
 	runErr := cmd.Run()
-	var closeErr error
+	var logErr error
 	if logf != nil {
-		closeErr = logf.Close()
+		if err := logf.Chmod(0o644); err != nil {
+			logErr = errors.Join(logErr, fmt.Errorf("set converter log permissions: %w", err))
+		}
+		if err := logf.Close(); err != nil {
+			logErr = errors.Join(logErr, fmt.Errorf("close converter log: %w", err))
+		}
+		// Publish only a completely finalized log. If chmod or close failed,
+		// keep the previous log intact and let the deferred cleanup remove the
+		// temporary file.
+		if logErr == nil {
+			if err := os.Rename(logTempPath, o.Log); err != nil {
+				logErr = fmt.Errorf("replace converter log %s: %w", o.Log, err)
+			}
+		}
 	}
 	if runErr != nil {
 		if ctx.Err() != nil {
-			return fmt.Errorf("converter canceled: %w", ctx.Err())
+			return fmt.Errorf("converter canceled: %w", errors.Join(ctx.Err(), logErr))
 		}
 		if o.Log != "" {
-			return fmt.Errorf("converter failed (see %s): %w", o.Log, runErr)
+			if logErr == nil {
+				return fmt.Errorf("converter failed (see %s): %w", o.Log, runErr)
+			}
+			return fmt.Errorf("converter failed and converter log could not be saved: %w", errors.Join(runErr, logErr))
 		}
 		return fmt.Errorf("converter failed: %w", runErr)
 	}
-	if closeErr != nil {
-		return fmt.Errorf("close converter log: %w", closeErr)
+	if logErr != nil {
+		return fmt.Errorf("save converter log: %w", logErr)
 	}
-	info, err := os.Stat(tmpPath)
+	info, err := os.Lstat(tmpPath)
 	if err != nil {
 		return fmt.Errorf("converter did not create output: %w", err)
+	}
+	// The converter is an external process and can replace the temporary
+	// output path itself. Do not follow a symlink (or chmod a special file's
+	// target) when validating and publishing its result.
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("converter output is not a regular file")
+	}
+	// A regular-file check alone does not detect replacement with a hard link
+	// to an unrelated file. Compare the directory entry with the inode created
+	// above before chmod or publication, so a converter cannot change the mode
+	// of an external hard-link target.
+	if !os.SameFile(tmpInfo, info) {
+		return fmt.Errorf("converter replaced its temporary output file")
 	}
 	if info.Size() == 0 {
 		return fmt.Errorf("converter created empty output")
