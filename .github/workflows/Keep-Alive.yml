@@ -29,8 +29,6 @@ jobs:
         run: |
           set -Eeuo pipefail
 
-          mkdir -p .github
-
           timestamp="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
           printf 'Last kept alive on: %s\n' "$timestamp" \
             > .github/keep-alive.txt
