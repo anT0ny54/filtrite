@@ -431,3 +431,58 @@ func TestConvertRejectsConverterReplacingTemporaryOutputWithHardLink(t *testing.
 		t.Fatalf("final output was published from a replaced temporary path: stat=%v", statErr)
 	}
 }
+
+func TestConvertRejectsConverterReplacingTemporaryLog(t *testing.T) {
+	if _, err := os.Stat("/proc/self/fd/1"); err != nil {
+		t.Skipf("requires procfs to locate the converter's inherited stdout: %v", err)
+	}
+	for _, replacement := range []string{"symlink", "hardlink"} {
+		t.Run(replacement, func(t *testing.T) {
+			root := t.TempDir()
+			input := filepath.Join(root, "input.txt")
+			output := filepath.Join(root, "output.dat")
+			logPath := filepath.Join(root, "converter.log")
+			target := filepath.Join(root, "external.log")
+			converter := filepath.Join(root, "converter.sh")
+			if err := os.WriteFile(input, []byte("||example.com^\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			const sentinel = "preserve external log target\n"
+			if err := os.WriteFile(target, []byte(sentinel), 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			linkCommand := "ln -s"
+			if replacement == "hardlink" {
+				linkCommand = "ln"
+			}
+			script := "#!/bin/sh\nset -eu\n" +
+				"exec 3>&1\n" +
+				"logtmp=\"$(readlink /proc/self/fd/3)\"\n" +
+				"exec 3>&-\n" +
+				"rm -f \"$logtmp\"\n" +
+				linkCommand + " " + target + " \"$logtmp\"\n" +
+				"for arg in \"$@\"; do case \"$arg\" in --output_file=*) printf ruleset > \"${arg#--output_file=}\";; esac; done\n"
+			if err := os.WriteFile(converter, []byte(script), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(converter, 0o755); err != nil {
+				t.Fatal(err)
+			}
+
+			err := Convert(context.Background(), Options{Converter: converter, Input: input, Output: output, Log: logPath})
+			if err == nil || !strings.Contains(err.Error(), "converter replaced its temporary log file") {
+				t.Fatalf("Convert error=%v, want replaced-temporary-log rejection", err)
+			}
+			if got, readErr := os.ReadFile(target); readErr != nil || string(got) != sentinel {
+				t.Fatalf("external log target changed: got=%q err=%v", got, readErr)
+			}
+			if _, statErr := os.Lstat(logPath); !os.IsNotExist(statErr) {
+				t.Fatalf("replacement log path was published: stat=%v", statErr)
+			}
+			if _, statErr := os.Lstat(output); !os.IsNotExist(statErr) {
+				t.Fatalf("output was published despite temporary-log replacement: stat=%v", statErr)
+			}
+		})
+	}
+}

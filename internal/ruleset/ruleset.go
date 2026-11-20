@@ -151,6 +151,7 @@ func Convert(ctx context.Context, o Options) error {
 	cmd := exec.CommandContext(ctx, converterPath, args...)
 	var logf *os.File
 	var logTempPath string
+	var logTempInfo os.FileInfo
 	if o.Log != "" {
 		if err := os.MkdirAll(filepath.Dir(o.Log), 0o755); err != nil {
 			return fmt.Errorf("create log directory: %w", err)
@@ -163,6 +164,12 @@ func Convert(ctx context.Context, o Options) error {
 			return fmt.Errorf("create converter log: %w", err)
 		}
 		logTempPath = logf.Name()
+		logTempInfo, err = logf.Stat()
+		if err != nil {
+			_ = logf.Close()
+			_ = os.Remove(logTempPath)
+			return fmt.Errorf("inspect temporary converter log: %w", err)
+		}
 		defer os.Remove(logTempPath)
 		cmd.Stdout = logf
 		cmd.Stderr = logf
@@ -180,8 +187,23 @@ func Convert(ctx context.Context, o Options) error {
 		// keep the previous log intact and let the deferred cleanup remove the
 		// temporary file.
 		if logErr == nil {
-			if err := os.Rename(logTempPath, o.Log); err != nil {
-				logErr = fmt.Errorf("replace converter log %s: %w", o.Log, err)
+			// The converter inherits the temporary log as stdout/stderr and can
+			// discover its path through /proc/self/fd/1 on Linux. Verify that the
+			// directory entry still names the original regular file before
+			// publishing it; otherwise a child could replace it with a symlink or
+			// hard link and make the wrapper publish an unrelated path/inode.
+			info, err := os.Lstat(logTempPath)
+			switch {
+			case err != nil:
+				logErr = fmt.Errorf("converter replaced its temporary log file: %w", err)
+			case !info.Mode().IsRegular():
+				logErr = fmt.Errorf("converter replaced its temporary log file with a non-regular object")
+			case !os.SameFile(logTempInfo, info):
+				logErr = fmt.Errorf("converter replaced its temporary log file")
+			default:
+				if err := os.Rename(logTempPath, o.Log); err != nil {
+					logErr = fmt.Errorf("replace converter log %s: %w", o.Log, err)
+				}
 			}
 		}
 	}
