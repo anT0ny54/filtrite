@@ -1,15 +1,15 @@
 ## [Unreleased]
 
 ### Latest review and maintenance update
-- Re-reviewed the merged 34-file project from `filtrite-main.zip` plus `filtrite-re-review-patch.zip`; every file was read in full before selecting changes.
-- Simplified converter URL percent-escape validation to a single pattern scan, avoiding repeated suffix copies while rejecting malformed and incomplete escapes before build cleanup.
-- Added regression cases for one-digit and non-hex percent escapes. Valid percent-encoded path bytes remain accepted.
-- Updated `README.md` to specify the exact percent-escape rule. No further dead code, redundant code, correctness defects, conflicts, or safe optimization opportunities were confirmed; no speculative Go changes were made.
+- Re-read all 36 files in the original project combined with the supplied second-, fifth-, and sixth-review patches before evaluating behavior. No other confirmed dead or redundant Go application code was found; no speculative cleanup was made.
+- Fixed converter-log publication in `internal/ruleset.Convert`. The wrapper now snapshots the temporary log file's identity when it creates it and, after the converter exits, uses `Lstat`, a regular-file check, and `os.SameFile` to reject a temporary path replaced with a symlink, special object, or hard link to an unrelated file. This prevents a converter from substituting an external file for the captured log before the wrapper publishes it.
+- Added regression coverage for both symlink and hard-link replacement of the temporary log. The tests confirm the external target remains unchanged and neither the log nor output is published after replacement. The test uses Linux procfs to locate the inherited stdout descriptor and skips on systems without `/proc/self/fd`.
+- Updated `README.md` to describe the converter-log identity check and its regression coverage. The existing release-retention fix and per-attempt downloader deadline checks from the supplied patches remain intact.
 
 ### Verification
-- `bash -n` passed for `build.sh` and all shell scripts.
-- `bash scripts/build_preflight_test.sh` passed all 34 regression cases; the reported count is now derived from the fixture setup so it cannot silently drift.
-- `bash scripts/validate_test.sh` passed all validator fixtures; the optional real-converter cross-check was skipped because `deps/ruleset_converter` is unavailable.
-- `gofmt` reported no unformatted Go files.
-- Go tests, race-enabled Go tests, and `go vet` passed in an isolated compatibility copy using the installed Go 1.23.2 toolchain; only that copy's `go.mod` was adjusted. The submitted project still requires Go 1.27.4, which is unavailable in this environment.
-- Native Go 1.27.4 verification could not run because the required toolchain is not installed and toolchain download access is unavailable. No fuzz-test result is claimed for this review.
+- `bash -n build.sh scripts/*.sh` passed.
+- `bash scripts/prune_releases_test.sh` passed; `bash scripts/build_preflight_test.sh` passed all 34 cases; `bash scripts/validate_test.sh` passed (the optional converter cross-check was skipped because `deps/ruleset_converter` is not present).
+- Both GitHub Actions workflow YAML files parsed successfully; all Go files pass `gofmt`.
+- `go test ./...`, `go test -race ./...`, `go vet ./...`, and `go build ./...` passed in an isolated compatibility copy using the installed Go 1.23.2 toolchain; only that copy's `go.mod` directive was adjusted. The submitted project still requires Go 1.27.4.
+- Three-second fuzz smoke runs passed for `FuzzNormalize` (28,342 executions) and `FuzzURLsFromFile` (11,618 executions).
+- Native verification with Go 1.27.4 could not run because the toolchain was not installed and network access prevented downloading it. The live GitHub release API/delete operations were not run against the user's repository; release cleanup was verified offline with a fake GitHub CLI and the installed `jq`.
