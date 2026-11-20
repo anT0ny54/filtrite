@@ -186,19 +186,6 @@ func AllWithCache(ctx context.Context, urls []string, dir, cacheDir string, work
 	if err := os.MkdirAll(destination, 0o755); err != nil {
 		return nil, fmt.Errorf("create download directory: %w", err)
 	}
-	if deadline, ok := ctx.Deadline(); ok {
-		// Each attempt can take up to `timeout`; cap retries so the
-		// worst-case total attempt time fits inside the caller's deadline
-		// instead of silently degrading into context cancellation.
-		maxAttempts := int(time.Until(deadline) / timeout)
-		if maxAttempts < 1 {
-			maxAttempts = 1
-		}
-		if retries+1 > maxAttempts {
-			retries = maxAttempts - 1
-		}
-	}
-
 	type job struct {
 		index int
 		url   string
@@ -344,6 +331,24 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 			if errors.As(last, &status) && status.RetryAfter > delay {
 				delay = status.RetryAfter
 			}
+			// Check the live deadline for every source/retry. A single retry
+			// budget computed before workers start becomes stale while earlier
+			// jobs run, and it must include Retry-After as well as the next
+			// request timeout. Do not start an attempt that cannot fit; return
+			// the last request error instead of turning it into a deadline
+			// cancellation during backoff or the next request.
+			if err := ctx.Err(); err != nil {
+				return "", 0, err
+			}
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					return "", 0, context.DeadlineExceeded
+				}
+				if remaining <= delay+c.Timeout {
+					break
+				}
+			}
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
@@ -355,6 +360,21 @@ func get(ctx context.Context, c *http.Client, rawURL, dir string, retries int, b
 					}
 				}
 				return "", 0, ctx.Err()
+			}
+			// Scheduler delays can consume part of the reserved request window.
+			// Recheck after backoff so a retry is not launched with less than one
+			// full per-request timeout left before the manifest deadline.
+			if err := ctx.Err(); err != nil {
+				return "", 0, err
+			}
+			if deadline, ok := ctx.Deadline(); ok {
+				remaining := time.Until(deadline)
+				if remaining <= 0 {
+					return "", 0, context.DeadlineExceeded
+				}
+				if remaining <= c.Timeout {
+					break
+				}
 			}
 		}
 		p, n, e := getOnce(ctx, c, rawURL, dir, budget)

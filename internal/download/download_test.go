@@ -295,6 +295,57 @@ func TestPerRequestTimeoutIsRetried(t *testing.T) {
 	}
 }
 
+func TestGetSkipsRetryThatCannotFitRetryAfterAndRequestTimeout(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "120")
+		http.Error(w, "temporarily unavailable", http.StatusTooManyRequests)
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 1500*time.Millisecond)
+	defer cancel()
+	c := newClient(500 * time.Millisecond)
+	defer c.CloseIdleConnections()
+
+	_, _, err := get(ctx, c, srv.URL, t.TempDir(), 4, newByteBudget(MaxTotalBytes))
+	if err == nil || !strings.Contains(err.Error(), "after 1 attempts") {
+		t.Fatalf("get error=%v, want last HTTP error after one attempt", err)
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("get error=%v, want retry skipped before deadline cancellation", err)
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("server calls=%d, want exactly one request because Retry-After plus timeout cannot fit", got)
+	}
+}
+
+func TestGetRechecksRemainingDeadlineAfterRequestTimeout(t *testing.T) {
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3200*time.Millisecond)
+	defer cancel()
+	c := newClient(1500 * time.Millisecond)
+	defer c.CloseIdleConnections()
+
+	_, _, err := get(ctx, c, srv.URL, t.TempDir(), 4, newByteBudget(MaxTotalBytes))
+	if err == nil || !strings.Contains(err.Error(), "after 1 attempts") {
+		t.Fatalf("get error=%v, want last request error after one attempt", err)
+	}
+	if ctx.Err() != nil {
+		t.Fatalf("manifest context error=%v, want deadline still active when retry is skipped", ctx.Err())
+	}
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("server calls=%d, want one request because the remaining deadline cannot fit backoff plus another timeout", got)
+	}
+}
+
 func TestRetryableConnectionReset(t *testing.T) {
 	if !retryable(syscall.ECONNRESET) {
 		t.Fatal("ECONNRESET should be retryable")
